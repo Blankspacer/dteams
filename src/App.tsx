@@ -6,6 +6,7 @@
 import React, { Component, ErrorInfo, ReactNode, useEffect, useState } from 'react';
 import { Loader2, AlertCircle, X } from 'lucide-react';
 import { AppProvider, useApp } from './context/AppContext';
+import { NotificationProvider } from './context/NotificationContext';
 import { AuthScreen } from './components/auth/AuthScreen';
 import { TopNav } from './components/layout/TopNav';
 import { BottomNav } from './components/layout/BottomNav';
@@ -19,6 +20,7 @@ import { OfflineIndicator } from './components/common/OfflineIndicator';
 import { MobileDownloadModal } from './components/common/MobileDownloadModal';
 import { AddMemberModal } from './components/common/AddMemberModal';
 import { IncomingCallOverlay } from './components/common/IncomingCallOverlay';
+import { MeetingReminderOverlay } from './components/common/MeetingReminderOverlay';
 import { sounds } from './utils/audio';
 
 interface ErrorBoundaryState {
@@ -158,6 +160,7 @@ function MainAppShell() {
 
       <Footer className="mb-16 md:mb-0" />
       <BottomNav />
+      <MeetingReminderOverlay />
       <IncomingCallOverlay />
       <OfflineIndicator />
       <MobileDownloadModal isOpen={downloadModalOpen} onClose={closeDownloadModal} />
@@ -179,7 +182,9 @@ export default function App() {
   return (
     <AppErrorBoundary>
       <AppProvider>
-        <MainAppShell />
+        <NotificationProvider>
+          <MainAppShell />
+        </NotificationProvider>
       </AppProvider>
     </AppErrorBoundary>
   );

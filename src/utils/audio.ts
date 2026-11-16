@@ -182,6 +182,33 @@ class SoundController {
     osc.start(now);
     osc.stop(now + 0.07);
   }
+
+  // Upcoming 5-Minute Meeting Alert Chime (warm double-bell chime)
+  playMeetingReminder() {
+    const ctx = this.getContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const notes = [587.33, 880.0, 1174.66]; // D5, A5, D6
+    notes.forEach((freq, idx) => {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+
+      const startTime = now + idx * 0.14;
+      gain.gain.setValueAtTime(0.001, startTime);
+      gain.gain.linearRampToValueAtTime(0.18, startTime + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, startTime + 0.45);
+
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      osc.start(startTime);
+      osc.stop(startTime + 0.48);
+    });
+  }
 }
 
 export const sounds = new SoundController();

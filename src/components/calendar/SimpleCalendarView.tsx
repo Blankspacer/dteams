@@ -15,8 +15,11 @@ import {
   Check,
   X,
   Plus,
+  Bell,
+  BellRing,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useMeetingNotifications } from '../../context/NotificationContext';
 import { MeetingRecord } from '../../types';
 import {
   CALENDAR_TIME_SLOTS,
@@ -46,6 +49,14 @@ export const SimpleCalendarView: React.FC = () => {
     setActiveTab,
     setErrorBanner,
   } = useApp();
+
+  const {
+    permission: notifPermission,
+    remindersEnabled,
+    toggleRemindersEnabled,
+    requestNotificationPermission,
+    sendTestReminder,
+  } = useMeetingNotifications();
 
   const today = new Date();
   const todayKey = formatDateKey(today);
@@ -270,10 +281,49 @@ export const SimpleCalendarView: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
             <span className="px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold tabular-nums">
               {upcomingOnlyEvents.length} Upcoming
             </span>
+
+            {notifPermission === 'default' && (
+              <button
+                type="button"
+                onClick={() => requestNotificationPermission()}
+                className="min-h-[38px] px-3 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                title="Allow browser push alerts 5 minutes before meetings"
+              >
+                <Bell className="w-3.5 h-3.5" />
+                <span>Enable 5-Min Push Alerts</span>
+              </button>
+            )}
+
+            {notifPermission === 'granted' && (
+              <button
+                type="button"
+                onClick={toggleRemindersEnabled}
+                className={`min-h-[38px] px-3 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                  remindersEnabled
+                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                    : 'bg-slate-50 border-slate-200 text-slate-600'
+                }`}
+                title="Toggle automatic 5-minute meeting notifications"
+              >
+                <BellRing className="w-3.5 h-3.5" />
+                <span>5-Min Alerts: {remindersEnabled ? 'ON' : 'OFF'}</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={() => sendTestReminder()}
+              className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+              title="Preview the 5-minute meeting notification alert"
+            >
+              <Bell className="w-3.5 h-3.5 text-sky-600" />
+              <span>Test Alert</span>
+            </button>
+
             <button
               type="button"
               onClick={() => {

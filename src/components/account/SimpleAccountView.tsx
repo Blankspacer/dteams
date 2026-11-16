@@ -16,8 +16,11 @@ import {
   Camera,
   Loader2,
   AlertCircle,
+  Bell,
+  Volume2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useMeetingNotifications } from '../../context/NotificationContext';
 import { AddMemberModal } from '../common/AddMemberModal';
 import { MobileDownloadModal } from '../common/MobileDownloadModal';
 import { PWAInstallButton } from '../common/PWAInstallButton';
@@ -65,6 +68,15 @@ export const SimpleAccountView: React.FC = () => {
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const { downloadLink } = usePWAInstall();
+  const {
+    permission: notifPermission,
+    remindersEnabled,
+    soundEnabled,
+    toggleRemindersEnabled,
+    toggleSoundEnabled,
+    requestNotificationPermission,
+    sendTestReminder,
+  } = useMeetingNotifications();
 
   useEffect(() => {
     if (currentProfile) {
@@ -404,6 +416,80 @@ export const SimpleAccountView: React.FC = () => {
                 <UserPlus className="w-4 h-4" />
                 <span>Add Member</span>
               </button>
+            </div>
+
+            <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
+                  <Bell className="w-4 h-4 text-sky-600" />
+                  <h2>Meeting Push Notifications</h2>
+                </div>
+                <span
+                  className={`px-2 py-0.5 rounded-md text-[11px] font-semibold ${
+                    notifPermission === 'granted'
+                      ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                      : notifPermission === 'denied'
+                        ? 'bg-rose-50 text-rose-700 border border-rose-200'
+                        : 'bg-amber-50 text-amber-700 border border-amber-200'
+                  }`}
+                >
+                  {notifPermission === 'granted'
+                    ? 'Browser Push Enabled'
+                    : notifPermission === 'denied'
+                      ? 'Browser Blocked'
+                      : notifPermission === 'unsupported'
+                        ? 'In-App Only'
+                        : 'Permission Needed'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Receive push notifications, sound chimes, and quick-join alerts 5 minutes before scheduled calendar meetings start.
+              </p>
+
+              <div className="space-y-2 pt-1">
+                <label className="flex items-center justify-between gap-2 text-xs font-semibold text-slate-800 cursor-pointer">
+                  <span>5-Minute Meeting Alerts</span>
+                  <input
+                    type="checkbox"
+                    checked={remindersEnabled}
+                    onChange={toggleRemindersEnabled}
+                    className="w-4 h-4 accent-sky-600 cursor-pointer"
+                  />
+                </label>
+
+                <label className="flex items-center justify-between gap-2 text-xs font-semibold text-slate-800 cursor-pointer">
+                  <span className="flex items-center gap-1.5">
+                    <Volume2 className="w-3.5 h-3.5 text-slate-500" />
+                    <span>Play Chime Sound</span>
+                  </span>
+                  <input
+                    type="checkbox"
+                    checked={soundEnabled}
+                    onChange={toggleSoundEnabled}
+                    className="w-4 h-4 accent-sky-600 cursor-pointer"
+                  />
+                </label>
+              </div>
+
+              <div className="flex flex-wrap gap-2 pt-1">
+                {notifPermission === 'default' && (
+                  <button
+                    type="button"
+                    onClick={() => requestNotificationPermission()}
+                    className="flex-1 min-h-[40px] px-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                  >
+                    <Bell className="w-3.5 h-3.5" />
+                    <span>Enable Push Alerts</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => sendTestReminder()}
+                  className="flex-1 min-h-[40px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold transition-colors"
+                >
+                  Send Test Alert
+                </button>
+              </div>
             </div>
 
             <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-2.5">
