@@ -1,0 +1,465 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Helper Primitives ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'sneloy@gmail.com'
+      );
+    }
+
+    // --- Validation Helpers ---
+    function isValidAdminMarker(data, uid) {
+      return data.keys().hasAll(['uid', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'createdAt']) &&
+        data.uid is string && data.uid == uid && isValidId(data.uid) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidUserProfile(data, uid) {
+      return data.keys().hasAll([
+          'uid', 'displayName', 'status', 'role',
+          'canCreateMeetings', 'canRecordMeetings', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid', 'displayName', 'title', 'department', 'avatar',
+          'status', 'role', 'canCreateMeetings', 'canRecordMeetings',
+          'e2eeFingerprint', 'createdAt', 'updatedAt'
+        ]) &&
+        data.uid is string && data.uid == uid && isValidId(data.uid) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        (!('title' in data) || (data.title is string && data.title.size() <= 80)) &&
+        (!('department' in data) || (data.department is string && data.department.size() <= 50)) &&
+        (!('avatar' in data) || (data.avatar is string && data.avatar.size() <= 1000)) &&
+        data.status in ['online', 'busy', 'away', 'offline'] &&
+        data.role in ['admin', 'member'] &&
+        data.canCreateMeetings is bool &&
+        data.canRecordMeetings is bool &&
+        (!('e2eeFingerprint' in data) || (data.e2eeFingerprint is string && data.e2eeFingerprint.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserPrivateInfo(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'createdAt', 'updatedAt']) &&
+        data.uid is string && data.uid == uid && isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUserContact(data, userId, contactId) {
+      return data.keys().hasAll(['uid', 'addedByUid', 'displayName', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'addedByUid', 'displayName', 'createdAt']) &&
+        data.uid is string && data.uid == contactId && isValidId(data.uid) &&
+        data.addedByUid is string && data.addedByUid == userId && isValidId(data.addedByUid) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidConversation(data) {
+      return data.keys().hasAll(['name', 'type', 'isPublic', 'ownerId', 'participantIds', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'name', 'type', 'isPublic', 'ownerId', 'participantIds',
+          'lastMessageText', 'lastMessageSender', 'createdAt', 'updatedAt'
+        ]) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 100 &&
+        data.type in ['channel', 'direct'] &&
+        data.isPublic is bool &&
+        data.ownerId is string && isValidId(data.ownerId) &&
+        data.participantIds is list && data.participantIds.size() >= 1 && data.participantIds.size() <= 50 &&
+        data.participantIds[0] is string && data.participantIds[0].size() <= 128 &&
+        (!('lastMessageText' in data) || (data.lastMessageText is string && data.lastMessageText.size() <= 500)) &&
+        (!('lastMessageSender' in data) || (data.lastMessageSender is string && data.lastMessageSender.size() <= 80)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidChatMessage(data, convId) {
+      return data.keys().hasAll([
+          'conversationId', 'senderId', 'senderName', 'content',
+          'isPublic', 'participantIds', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'conversationId', 'senderId', 'senderName', 'senderAvatar',
+          'content', 'ciphertext', 'iv', 'attachmentName', 'attachmentType',
+          'attachmentSize', 'attachmentData', 'isPublic', 'participantIds', 'createdAt'
+        ]) &&
+        data.conversationId is string && data.conversationId == convId && isValidId(data.conversationId) &&
+        data.senderId is string && isValidId(data.senderId) &&
+        data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 80 &&
+        (!('senderAvatar' in data) || (data.senderAvatar is string && data.senderAvatar.size() <= 1000)) &&
+        data.content is string && data.content.size() <= 5000 &&
+        (!('ciphertext' in data) || (data.ciphertext is string && data.ciphertext.size() <= 10000)) &&
+        (!('iv' in data) || (data.iv is string && data.iv.size() <= 128)) &&
+        (!('attachmentName' in data) || (data.attachmentName is string && data.attachmentName.size() <= 200)) &&
+        (!('attachmentType' in data) || data.attachmentType in ['none', 'image', 'file']) &&
+        (!('attachmentSize' in data) || (data.attachmentSize is number && data.attachmentSize >= 0 && data.attachmentSize <= 1000000)) &&
+        (!('attachmentData' in data) || (data.attachmentData is string && data.attachmentData.size() <= 700000)) &&
+        data.isPublic is bool &&
+        data.participantIds is list && data.participantIds.size() >= 1 && data.participantIds.size() <= 50 &&
+        data.participantIds[0] is string && data.participantIds[0].size() <= 128 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidMeeting(data) {
+      return data.keys().hasAll([
+          'title', 'organizerId', 'organizerName', 'status',
+          'isPublic', 'participantIds', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'title', 'organizerId', 'organizerName', 'status', 'scheduledTime',
+          'isPublic', 'participantIds', 'transcriptText', 'aiSummary',
+          'decisions', 'actionItems', 'createdAt', 'updatedAt'
+        ]) &&
+        data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
+        data.organizerId is string && isValidId(data.organizerId) &&
+        data.organizerName is string && data.organizerName.size() >= 1 && data.organizerName.size() <= 80 &&
+        data.status in ['upcoming', 'live', 'completed'] &&
+        (!('scheduledTime' in data) || (data.scheduledTime is string && data.scheduledTime.size() <= 80)) &&
+        data.isPublic is bool &&
+        data.participantIds is list && data.participantIds.size() >= 1 && data.participantIds.size() <= 50 &&
+        data.participantIds[0] is string && data.participantIds[0].size() <= 128 &&
+        (!('transcriptText' in data) || (data.transcriptText is string && data.transcriptText.size() <= 60000)) &&
+        (!('aiSummary' in data) || (data.aiSummary is string && data.aiSummary.size() <= 5000)) &&
+        (!('decisions' in data) || (data.decisions is list && data.decisions.size() <= 30 && (data.decisions.size() == 0 || data.decisions[0] is string))) &&
+        (!('actionItems' in data) || (data.actionItems is list && data.actionItems.size() <= 30 && (data.actionItems.size() == 0 || data.actionItems[0] is string))) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCallSignal(data, meetingId) {
+      return data.keys().hasAll([
+          'meetingId', 'fromUid', 'toUid', 'type', 'payload', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'meetingId', 'fromUid', 'toUid', 'type', 'payload', 'createdAt'
+        ]) &&
+        data.meetingId is string && data.meetingId == meetingId && isValidId(data.meetingId) &&
+        data.fromUid is string && isValidId(data.fromUid) &&
+        data.toUid is string && isValidId(data.toUid) &&
+        data.type in ['ready', 'offer', 'answer', 'ice', 'leave'] &&
+        data.payload is string && data.payload.size() <= 15000 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidTeamInvite(data) {
+      return data.keys().hasAll([
+          'name', 'email', 'invitedByUid', 'invitedByName',
+          'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'name', 'email', 'title', 'department',
+          'invitedByUid', 'invitedByName', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 80 &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        (!('title' in data) || (data.title is string && data.title.size() <= 80)) &&
+        (!('department' in data) || (data.department is string && data.department.size() <= 50)) &&
+        data.invitedByUid is string && isValidId(data.invitedByUid) &&
+        data.invitedByName is string && data.invitedByName.size() >= 1 && data.invitedByName.size() <= 80 &&
+        data.status in ['pending', 'joined'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    // --- Collection Rules ---
+
+    // 1. Admins collection
+    match /admins/{userId} {
+      allow get: if isVerifiedUser() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isAdmin() && isValidId(userId) && isValidAdminMarker(incoming(), userId) && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isAdmin() && isValidId(userId);
+    }
+
+    // 2. Public team directory profiles (no PII)
+    match /users/{userId} {
+      allow get: if isVerifiedUser() && isValidId(userId);
+      allow list: if isVerifiedUser();
+      allow create: if isVerifiedUser() && isValidId(userId) &&
+        request.auth.uid == userId &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (isAdmin() || (incoming().role == 'member' && incoming().canCreateMeetings == true && incoming().canRecordMeetings == true));
+
+      allow update: if isVerifiedUser() && isValidId(userId) &&
+        isValidUserProfile(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            request.auth.uid == userId &&
+            incoming().role == existing().role &&
+            incoming().canCreateMeetings == existing().canCreateMeetings &&
+            incoming().canRecordMeetings == existing().canRecordMeetings &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'title', 'department', 'avatar', 'status', 'e2eeFingerprint', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isAdmin() && isValidId(userId);
+
+      // Private PII subcollection
+      match /private/info {
+        allow get: if isVerifiedUser() && isValidId(userId) && (request.auth.uid == userId || isAdmin());
+        allow list: if false;
+        allow create: if isVerifiedUser() && isValidId(userId) &&
+          request.auth.uid == userId &&
+          isValidUserPrivateInfo(incoming(), userId) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time;
+        allow update: if isVerifiedUser() && isValidId(userId) &&
+          (request.auth.uid == userId || isAdmin()) &&
+          isValidUserPrivateInfo(incoming(), userId) &&
+          incoming().uid == existing().uid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['email', 'updatedAt']);
+        allow delete: if isAdmin() && isValidId(userId);
+      }
+
+      // Personal added chat contacts (owner or admin only)
+      match /contacts/{contactId} {
+        allow get: if isVerifiedUser() && isValidId(userId) && isValidId(contactId) && (
+          resource == null ||
+          request.auth.uid == userId ||
+          isAdmin()
+        );
+        allow list: if isVerifiedUser() && isValidId(userId) && (
+          resource.data.addedByUid == request.auth.uid ||
+          isAdmin()
+        );
+        allow create: if isVerifiedUser() && isValidId(userId) && isValidId(contactId) &&
+          request.auth.uid == userId &&
+          isValidUserContact(incoming(), userId, contactId) &&
+          incoming().addedByUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          exists(/databases/$(database)/documents/users/$(contactId));
+        allow update: if false;
+        allow delete: if isVerifiedUser() && isValidId(userId) && isValidId(contactId) && (
+          request.auth.uid == userId ||
+          isAdmin()
+        );
+      }
+    }
+
+    // 3. Conversations (Channels, Groups, and Direct Messages)
+    match /conversations/{conversationId} {
+      allow get: if isVerifiedUser() && isValidId(conversationId) && (
+        resource == null ||
+        existing().isPublic == true ||
+        request.auth.uid in existing().participantIds ||
+        isAdmin()
+      );
+      allow list: if isVerifiedUser() && (
+        resource.data.isPublic == true ||
+        request.auth.uid in resource.data.participantIds ||
+        isAdmin()
+      );
+      allow create: if isVerifiedUser() && isValidId(conversationId) &&
+        isValidConversation(incoming()) &&
+        incoming().ownerId == request.auth.uid &&
+        request.auth.uid in incoming().participantIds &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() && isValidId(conversationId) &&
+        isValidConversation(incoming()) &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            (existing().isPublic == true || request.auth.uid in existing().participantIds) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageText', 'lastMessageSender', 'updatedAt'])
+          ) || (
+            existing().isPublic == true &&
+            existing().ownerId in incoming().participantIds &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['participantIds', 'updatedAt'])
+          ) || (
+            existing().ownerId == request.auth.uid &&
+            existing().ownerId in incoming().participantIds &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['name', 'participantIds', 'lastMessageText', 'lastMessageSender', 'updatedAt'])
+          )
+        );
+      allow delete: if isVerifiedUser() && isValidId(conversationId) && (existing().ownerId == request.auth.uid || isAdmin());
+
+      // Messages subcollection (Master Gate checks parent conversation)
+      match /messages/{messageId} {
+        allow get: if isVerifiedUser() && isValidId(conversationId) && isValidId(messageId) && (
+          resource == null || (
+            exists(/databases/$(database)/documents/conversations/$(conversationId)) && (
+              get(/databases/$(database)/documents/conversations/$(conversationId)).data.isPublic == true ||
+              request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds ||
+              isAdmin()
+            )
+          )
+        );
+        allow list: if isVerifiedUser() && (
+          resource.data.isPublic == true ||
+          request.auth.uid in resource.data.participantIds ||
+          resource.data.senderId == request.auth.uid ||
+          isAdmin()
+        );
+        allow create: if isVerifiedUser() && isValidId(conversationId) && isValidId(messageId) &&
+          isValidChatMessage(incoming(), conversationId) &&
+          incoming().senderId == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          exists(/databases/$(database)/documents/conversations/$(conversationId)) && (
+            get(/databases/$(database)/documents/conversations/$(conversationId)).data.isPublic == true ||
+            request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds
+          ) &&
+          incoming().isPublic == get(/databases/$(database)/documents/conversations/$(conversationId)).data.isPublic &&
+          incoming().participantIds == get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+        allow update: if isVerifiedUser() && isValidId(conversationId) && isValidId(messageId) &&
+          isValidChatMessage(incoming(), conversationId) &&
+          incoming().conversationId == existing().conversationId &&
+          incoming().senderId == existing().senderId &&
+          incoming().senderName == existing().senderName &&
+          incoming().content == existing().content &&
+          incoming().isPublic == existing().isPublic &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().diff(existing()).affectedKeys().hasOnly(['participantIds']) &&
+          exists(/databases/$(database)/documents/conversations/$(conversationId)) && (
+            isAdmin() ||
+            get(/databases/$(database)/documents/conversations/$(conversationId)).data.ownerId == request.auth.uid ||
+            get(/databases/$(database)/documents/conversations/$(conversationId)).data.isPublic == true
+          ) &&
+          incoming().participantIds == getAfter(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+        allow delete: if isVerifiedUser() && isValidId(conversationId) && isValidId(messageId) && (
+          existing().senderId == request.auth.uid || isAdmin()
+        );
+      }
+    }
+
+    // 4. Meetings & AI Transcriptions
+    match /meetings/{meetingId} {
+      allow get: if isVerifiedUser() && isValidId(meetingId) && (
+        resource == null ||
+        existing().isPublic == true ||
+        request.auth.uid in existing().participantIds ||
+        existing().organizerId == request.auth.uid ||
+        isAdmin()
+      );
+      allow list: if isVerifiedUser() && (
+        resource.data.isPublic == true ||
+        request.auth.uid in resource.data.participantIds ||
+        resource.data.organizerId == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isVerifiedUser() && isValidId(meetingId) &&
+        isValidMeeting(incoming()) &&
+        incoming().organizerId == request.auth.uid &&
+        request.auth.uid in incoming().participantIds &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() && isValidId(meetingId) &&
+        isValidMeeting(incoming()) &&
+        incoming().organizerId == existing().organizerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            existing().status != 'completed' &&
+            (existing().isPublic == true || request.auth.uid in existing().participantIds || existing().organizerId == request.auth.uid) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'participantIds', 'transcriptText', 'aiSummary', 'decisions', 'actionItems', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isVerifiedUser() && isValidId(meetingId) && (existing().organizerId == request.auth.uid || isAdmin());
+
+      // WebRTC peer-to-peer signaling messages
+      match /signals/{signalId} {
+        allow get: if isVerifiedUser() && isValidId(meetingId) && isValidId(signalId) && (
+          resource == null ||
+          existing().toUid == request.auth.uid ||
+          existing().fromUid == request.auth.uid ||
+          isAdmin()
+        );
+        allow list: if isVerifiedUser() && (
+          resource.data.toUid == request.auth.uid ||
+          resource.data.fromUid == request.auth.uid ||
+          isAdmin()
+        );
+        allow create: if isVerifiedUser() && isValidId(meetingId) && isValidId(signalId) &&
+          isValidCallSignal(incoming(), meetingId) &&
+          incoming().fromUid == request.auth.uid &&
+          incoming().createdAt == request.time &&
+          exists(/databases/$(database)/documents/meetings/$(meetingId)) && (
+            get(/databases/$(database)/documents/meetings/$(meetingId)).data.isPublic == true ||
+            request.auth.uid in get(/databases/$(database)/documents/meetings/$(meetingId)).data.participantIds
+          );
+        allow update: if false;
+        allow delete: if isVerifiedUser() && isValidId(meetingId) && isValidId(signalId) && (
+          existing().fromUid == request.auth.uid ||
+          existing().toUid == request.auth.uid ||
+          isAdmin()
+        );
+      }
+    }
+
+    // 5. Team Invites (PII protected per inviter, invitee, or admin)
+    match /team_invites/{inviteId} {
+      allow get: if isVerifiedUser() && isValidId(inviteId) && (
+        resource == null ||
+        existing().invitedByUid == request.auth.uid ||
+        existing().email == request.auth.token.email ||
+        isAdmin()
+      );
+      allow list: if isVerifiedUser() && (
+        resource.data.invitedByUid == request.auth.uid ||
+        resource.data.email == request.auth.token.email ||
+        isAdmin()
+      );
+      allow create: if isVerifiedUser() && isValidId(inviteId) &&
+        isValidTeamInvite(incoming()) &&
+        incoming().invitedByUid == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() && isValidId(inviteId) &&
+        isValidTeamInvite(incoming()) &&
+        incoming().invitedByUid == existing().invitedByUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isAdmin() || (
+            existing().email == request.auth.token.email &&
+            incoming().status == 'joined' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+      allow delete: if isVerifiedUser() && isValidId(inviteId) && (
+        existing().invitedByUid == request.auth.uid || isAdmin()
+      );
+    }
+  }
+}

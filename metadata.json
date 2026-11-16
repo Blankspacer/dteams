@@ -1,0 +1,12 @@
+{
+  "name": "SphereCall - Internal Team Office & Meeting Platform",
+  "description": "Skype-like internal office workspace with encrypted team messaging, scheduled and instant video meetings, file sharing, role-based admin controls, and AI meeting recording & automated transcription minutes.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "display-capture"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

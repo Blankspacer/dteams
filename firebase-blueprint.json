@@ -1,0 +1,453 @@
+{
+  "entities": {
+    "AdminMarker": {
+      "title": "Admin Marker",
+      "description": "Marks a verified user UID as an organization administrator.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "createdAt"]
+    },
+    "UserProfile": {
+      "title": "User Profile",
+      "description": "Public internal team directory profile (no PII such as email or phone).",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "department": {
+          "type": "string",
+          "maxLength": 50
+        },
+        "avatar": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "status": {
+          "type": "string",
+          "enum": ["online", "busy", "away", "offline"]
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "member"]
+        },
+        "canCreateMeetings": {
+          "type": "boolean"
+        },
+        "canRecordMeetings": {
+          "type": "boolean"
+        },
+        "e2eeFingerprint": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "status",
+        "role",
+        "canCreateMeetings",
+        "canRecordMeetings",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "UserPrivateInfo": {
+      "title": "User Private Info",
+      "description": "Isolated PII storage for user email and private contact info.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "createdAt", "updatedAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Team chat channel or 1-to-1 encrypted direct conversation.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "type": {
+          "type": "string",
+          "enum": ["channel", "direct"]
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "ownerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "participantIds": {
+          "type": "array",
+          "description": "Bounded list of participant UIDs (max 50)."
+        },
+        "lastMessageText": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "lastMessageSender": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["name", "type", "isPublic", "ownerId", "participantIds", "createdAt", "updatedAt"]
+    },
+    "ChatMessage": {
+      "title": "Chat Message",
+      "description": "Encrypted chat message or shared file/image attachment inside a conversation.",
+      "type": "object",
+      "properties": {
+        "conversationId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "senderName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "senderAvatar": {
+          "type": "string",
+          "maxLength": 1000
+        },
+        "content": {
+          "type": "string",
+          "maxLength": 5000
+        },
+        "ciphertext": {
+          "type": "string",
+          "maxLength": 10000
+        },
+        "iv": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "attachmentName": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "attachmentType": {
+          "type": "string",
+          "enum": ["none", "image", "file"]
+        },
+        "attachmentSize": {
+          "type": "number"
+        },
+        "attachmentData": {
+          "type": "string",
+          "maxLength": 700000
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "participantIds": {
+          "type": "array",
+          "description": "Bounded participant list for direct list query enforcement (max 50)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "conversationId",
+        "senderId",
+        "senderName",
+        "content",
+        "isPublic",
+        "participantIds",
+        "createdAt"
+      ]
+    },
+    "Meeting": {
+      "title": "Meeting",
+      "description": "Scheduled or live video call and AI meeting transcription record.",
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+        },
+        "organizerId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "organizerName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "status": {
+          "type": "string",
+          "enum": ["upcoming", "live", "completed"]
+        },
+        "scheduledTime": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "isPublic": {
+          "type": "boolean"
+        },
+        "participantIds": {
+          "type": "array",
+          "description": "Bounded participant list (max 50)."
+        },
+        "transcriptText": {
+          "type": "string",
+          "maxLength": 60000
+        },
+        "aiSummary": {
+          "type": "string",
+          "maxLength": 5000
+        },
+        "decisions": {
+          "type": "array",
+          "description": "List of meeting decisions (max 30)."
+        },
+        "actionItems": {
+          "type": "array",
+          "description": "List of action item strings (max 30)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "title",
+        "organizerId",
+        "organizerName",
+        "status",
+        "isPublic",
+        "participantIds",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "TeamInvite": {
+      "title": "Team Invite",
+      "description": "Invitation or added contact for a teammate to join the workspace.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "email": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "department": {
+          "type": "string",
+          "maxLength": 50
+        },
+        "invitedByUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "invitedByName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "joined"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "name",
+        "email",
+        "invitedByUid",
+        "invitedByName",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CallSignal": {
+      "title": "Call Signal",
+      "description": "WebRTC signaling message (ready, offer, answer, ice, leave) exchanged between active call participants.",
+      "type": "object",
+      "properties": {
+        "meetingId": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "fromUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "toUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["ready", "offer", "answer", "ice", "leave"]
+        },
+        "payload": {
+          "type": "string",
+          "maxLength": 15000
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["meetingId", "fromUid", "toUid", "type", "payload", "createdAt"]
+    },
+    "UserContact": {
+      "title": "User Contact",
+      "description": "A teammate added by the user to their personal chat contacts list.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "addedByUid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "addedByUid", "displayName", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/admins/{userId}": {
+      "schema": { "$ref": "#/entities/AdminMarker" },
+      "description": "Marks users who hold organization administrator privileges."
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Public directory profile for signed-up office members."
+    },
+    "/users/{userId}/private/info": {
+      "schema": { "$ref": "#/entities/UserPrivateInfo" },
+      "description": "Private PII (email) accessible only to the owning user or admins."
+    },
+    "/users/{userId}/contacts/{contactId}": {
+      "schema": { "$ref": "#/entities/UserContact" },
+      "description": "Teammates added by the user to their personal chat contacts list."
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "Team channels and 1-to-1 encrypted conversations."
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages and shared files within a conversation."
+    },
+    "/meetings/{meetingId}": {
+      "schema": { "$ref": "#/entities/Meeting" },
+      "description": "Video meetings, live calls, and AI-transcribed meeting minutes."
+    },
+    "/meetings/{meetingId}/signals/{signalId}": {
+      "schema": { "$ref": "#/entities/CallSignal" },
+      "description": "WebRTC peer-to-peer signaling messages for live audio and video calls."
+    },
+    "/team_invites/{inviteId}": {
+      "schema": { "$ref": "#/entities/TeamInvite" },
+      "description": "Team member invitations created by verified workspace members."
+    }
+  }
+}
