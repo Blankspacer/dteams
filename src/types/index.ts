@@ -1,6 +1,6 @@
 export type UserRole = 'admin' | 'member';
 export type UserStatus = 'online' | 'busy' | 'away' | 'offline';
-export type AppTab = 'chat' | 'video' | 'transcripts' | 'account';
+export type AppTab = 'chat' | 'video' | 'calendar' | 'transcripts' | 'account';
 
 export interface UserProfile {
   uid: string;

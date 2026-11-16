@@ -42,6 +42,7 @@ import {
 import { encryptE2EEMessage, generateUserFingerprint } from '../utils/crypto';
 import { sounds } from '../utils/audio';
 import { formatMoMForChat } from '../utils/transcript';
+import { formatScheduledValue, parseScheduledMeeting } from '../utils/calendar';
 
 interface AppContextType {
   firebaseUser: FirebaseUser | null;
@@ -105,6 +106,27 @@ interface AppContextType {
     participantIds?: string[],
     mode?: 'voice' | 'video'
   ) => Promise<MeetingRecord | null>;
+  scheduleMeeting: (params: {
+    title: string;
+    date: string;
+    time: string;
+    mode?: 'voice' | 'video';
+    participantIds?: string[];
+  }) => Promise<MeetingRecord | null>;
+  rescheduleMeeting: (
+    meetingId: string,
+    params: {
+      title: string;
+      date: string;
+      time: string;
+      mode?: 'voice' | 'video';
+      participantIds?: string[];
+    }
+  ) => Promise<void>;
+  shareScheduledMeetingToChat: (
+    meeting: MeetingRecord,
+    conversationId?: string
+  ) => Promise<boolean>;
   joinVideoCall: (meeting: MeetingRecord, mode?: 'voice' | 'video') => Promise<void>;
   answerIncomingCall: (meeting: MeetingRecord, mode?: 'voice' | 'video') => Promise<void>;
   declineIncomingCall: (meeting: MeetingRecord) => Promise<void>;
@@ -1001,6 +1023,144 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const scheduleMeeting = async (params: {
+    title: string;
+    date: string;
+    time: string;
+    mode?: 'voice' | 'video';
+    participantIds?: string[];
+  }): Promise<MeetingRecord | null> => {
+    if (!firebaseUser) return null;
+    const mode = params.mode || 'video';
+    const baseTitle = params.title.trim() || (mode === 'voice' ? 'Scheduled Voice Call' : 'Scheduled Team Meeting');
+    const finalTitle =
+      mode === 'voice' && !baseTitle.toLowerCase().includes('voice')
+        ? `Voice Call: ${baseTitle}`
+        : baseTitle;
+    const participants = Array.from(
+      new Set([firebaseUser.uid, ...(params.participantIds || [])])
+    ).slice(0, 50);
+    const meetingId = `meet-${Date.now().toString(36)}`;
+    const path = `meetings/${meetingId}`;
+
+    const record: Omit<MeetingRecord, 'id'> = {
+      title: finalTitle.slice(0, 150),
+      organizerId: firebaseUser.uid,
+      organizerName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
+      status: 'upcoming',
+      scheduledTime: formatScheduledValue(params.date, params.time),
+      isPublic: !params.participantIds || params.participantIds.length === 0,
+      participantIds: participants,
+      transcriptText: '',
+      aiSummary: '',
+      discussionPoints: [],
+      decisions: [],
+      actionItems: [],
+      tasks: [],
+      momText: '',
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    try {
+      await setDoc(doc(db, 'meetings', meetingId), record);
+      return { id: meetingId, ...record };
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  };
+
+  const rescheduleMeeting = async (
+    meetingId: string,
+    params: {
+      title: string;
+      date: string;
+      time: string;
+      mode?: 'voice' | 'video';
+      participantIds?: string[];
+    }
+  ) => {
+    if (!firebaseUser) return;
+    const mode = params.mode || 'video';
+    const rawTitle = params.title.trim() || (mode === 'voice' ? 'Scheduled Voice Call' : 'Scheduled Team Meeting');
+    const cleanedTitle = rawTitle.replace(/^Voice Call:\s*/i, '');
+    const finalTitle = mode === 'voice' ? `Voice Call: ${cleanedTitle}` : cleanedTitle;
+    const participants = Array.from(
+      new Set([firebaseUser.uid, ...(params.participantIds || [])])
+    ).slice(0, 50);
+    const path = `meetings/${meetingId}`;
+
+    try {
+      await updateDoc(doc(db, 'meetings', meetingId), {
+        title: finalTitle.slice(0, 150),
+        scheduledTime: formatScheduledValue(params.date, params.time),
+        isPublic: !params.participantIds || params.participantIds.length === 0,
+        participantIds: participants,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const shareScheduledMeetingToChat = async (
+    meeting: MeetingRecord,
+    conversationId?: string
+  ): Promise<boolean> => {
+    if (!firebaseUser) return false;
+    const targetConv =
+      (conversationId && conversations.find((c) => c.id === conversationId)) ||
+      conversations.find((c) => c.id === 'general') ||
+      conversations[0];
+    if (!targetConv) return false;
+
+    const parsed = parseScheduledMeeting(meeting.scheduledTime);
+    const whenText = parsed ? parsed.displayFull : meeting.scheduledTime || 'Upcoming';
+    const typeLabel = meeting.title.toLowerCase().includes('voice') ? 'Voice Call' : 'Video Meeting';
+    const text = `Scheduled ${typeLabel}: "${meeting.title}"\nDate & Time: ${whenText}\nOrganizer: ${meeting.organizerName}\nOpen the Calendar or Calls tab to join when it starts.`.slice(0, 5000);
+
+    const msgId = `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const path = `conversations/${targetConv.id}/messages/${msgId}`;
+    let ciphertext = '';
+    let iv = '';
+    try {
+      const encrypted = await encryptE2EEMessage(text, `conv-${targetConv.id}`);
+      ciphertext = encrypted.ciphertext.slice(0, 10000);
+      iv = encrypted.iv.slice(0, 128);
+    } catch {
+      // Fallback
+    }
+
+    try {
+      await setDoc(doc(db, 'conversations', targetConv.id, 'messages', msgId), {
+        conversationId: targetConv.id,
+        senderId: firebaseUser.uid,
+        senderName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
+        senderAvatar: (currentProfile?.avatar || firebaseUser.photoURL || '').slice(0, 65000),
+        content: text,
+        ciphertext,
+        iv,
+        attachmentName: '',
+        attachmentType: 'none',
+        attachmentSize: 0,
+        attachmentData: '',
+        isPublic: targetConv.isPublic,
+        participantIds: targetConv.participantIds,
+        createdAt: serverTimestamp(),
+      });
+      await updateDoc(doc(db, 'conversations', targetConv.id), {
+        lastMessageText: `Scheduled: ${meeting.title} (${whenText})`.slice(0, 500),
+        lastMessageSender: (currentProfile?.displayName || 'Member').slice(0, 80),
+        updatedAt: serverTimestamp(),
+      });
+      setActiveConversationId(targetConv.id);
+      sounds.playMessageNotification();
+      return true;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
+    }
+  };
+
   const joinVideoCall = async (meeting: MeetingRecord, mode?: 'voice' | 'video') => {
     if (!firebaseUser) return;
     setDismissedCallIds((prev) => (prev.includes(meeting.id) ? prev : [...prev, meeting.id]));
@@ -1443,6 +1603,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         sendMessage,
         removeMessage,
         startVideoCall,
+        scheduleMeeting,
+        rescheduleMeeting,
+        shareScheduledMeetingToChat,
         joinVideoCall,
         answerIncomingCall,
         declineIncomingCall,

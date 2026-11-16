@@ -1,5 +1,5 @@
 import React from 'react';
-import { MessageSquare, Phone, Sparkles, User } from 'lucide-react';
+import { Calendar, MessageSquare, Phone, Sparkles, User } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AppTab } from '../../types';
 
@@ -9,12 +9,13 @@ export const BottomNav: React.FC = () => {
   const tabs: Array<{ id: AppTab; label: string; icon: React.ReactNode }> = [
     { id: 'chat', label: 'Chat', icon: <MessageSquare className="w-5 h-5" /> },
     { id: 'video', label: 'Calls', icon: <Phone className="w-5 h-5" /> },
-    { id: 'transcripts', label: 'AI Assistant', icon: <Sparkles className="w-5 h-5" /> },
+    { id: 'calendar', label: 'Calendar', icon: <Calendar className="w-5 h-5" /> },
+    { id: 'transcripts', label: 'AI MoM', icon: <Sparkles className="w-5 h-5" /> },
     { id: 'account', label: 'Account', icon: <User className="w-5 h-5" /> },
   ];
 
   return (
-    <nav className="md:hidden fixed bottom-0 left-0 right-0 h-16 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-4 items-center z-40">
+    <nav className="md:hidden fixed bottom-0 left-0 right-0 h-16 bg-white/95 backdrop-blur-md border-t border-slate-200 grid grid-cols-5 items-center z-40">
       {tabs.map((tab) => {
         const isActive = activeTab === tab.id;
         return (

@@ -12,6 +12,7 @@ import { BottomNav } from './components/layout/BottomNav';
 import { Footer } from './components/layout/Footer';
 import { SimpleChatView } from './components/chat/SimpleChatView';
 import { SimpleVideoView } from './components/video/SimpleVideoView';
+import { SimpleCalendarView } from './components/calendar/SimpleCalendarView';
 import { SimpleTranscriptsView } from './components/transcripts/SimpleTranscriptsView';
 import { SimpleAccountView } from './components/account/SimpleAccountView';
 import { OfflineIndicator } from './components/common/OfflineIndicator';
@@ -150,6 +151,7 @@ function MainAppShell() {
       <div className="flex-1 flex overflow-hidden">
         {activeTab === 'chat' && <SimpleChatView />}
         {activeTab === 'video' && <SimpleVideoView />}
+        {activeTab === 'calendar' && <SimpleCalendarView />}
         {activeTab === 'transcripts' && <SimpleTranscriptsView />}
         {activeTab === 'account' && <SimpleAccountView />}
       </div>

@@ -18,6 +18,7 @@ import {
   Sparkles,
   Download,
   Volume2,
+  Calendar,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AddMemberModal } from '../common/AddMemberModal';
@@ -26,6 +27,7 @@ import { sounds } from '../../utils/audio';
 import { useWebRTCCall } from '../../hooks/useWebRTCCall';
 import { getEffectiveUserStatus, sortUsersByPresence } from '../../utils/presence';
 import { downloadTranscriptText, pickSupportedAudioMimeType } from '../../utils/transcript';
+import { parseScheduledMeeting } from '../../utils/calendar';
 import { MeetingRecord } from '../../types';
 
 const AUTO_TRANSCRIBE_STORAGE_KEY = 'spherecall_auto_transcribe';
@@ -196,6 +198,14 @@ export const SimpleVideoView: React.FC = () => {
   } | null>(null);
 
   const liveCalls = meetings.filter((m) => m.status === 'live');
+  const upcomingCalls = meetings
+    .filter((m) => m.status === 'upcoming')
+    .map((meeting) => ({
+      meeting,
+      parsed: parseScheduledMeeting(meeting.scheduledTime),
+      isVoice: meeting.title.toLowerCase().includes('voice'),
+    }))
+    .sort((a, b) => (a.parsed?.sortValue || 0) - (b.parsed?.sortValue || 0));
   const canRecord = currentProfile?.canRecordMeetings !== false;
 
   const { remoteStreams } = useWebRTCCall({
@@ -866,21 +876,31 @@ export const SimpleVideoView: React.FC = () => {
                 </p>
               </div>
 
-              {canRecord && (
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
                 <button
                   type="button"
-                  onClick={toggleAutoTranscribePreference}
-                  className={`min-h-[38px] px-3.5 rounded-xl border text-xs font-semibold flex items-center gap-2 transition-colors shrink-0 ${
-                    autoTranscribeEnabled
-                      ? 'bg-sky-50 border-sky-200 text-sky-800'
-                      : 'bg-slate-50 border-slate-200 text-slate-600'
-                  }`}
-                  title="Automatically transcribe calls and generate AI Meeting Minutes (MoM)"
+                  onClick={() => setActiveTab('calendar')}
+                  className="min-h-[38px] px-3.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors"
                 >
-                  <Sparkles className={`w-3.5 h-3.5 ${autoTranscribeEnabled ? 'text-sky-600' : 'text-slate-400'}`} />
-                  <span>AI Assistant: {autoTranscribeEnabled ? 'ON' : 'OFF'}</span>
+                  <Calendar className="w-3.5 h-3.5 text-sky-600" />
+                  <span>Schedule on Calendar</span>
                 </button>
-              )}
+                {canRecord && (
+                  <button
+                    type="button"
+                    onClick={toggleAutoTranscribePreference}
+                    className={`min-h-[38px] px-3.5 rounded-xl border text-xs font-semibold flex items-center gap-2 transition-colors ${
+                      autoTranscribeEnabled
+                        ? 'bg-sky-50 border-sky-200 text-sky-800'
+                        : 'bg-slate-50 border-slate-200 text-slate-600'
+                    }`}
+                    title="Automatically transcribe calls and generate AI Meeting Minutes (MoM)"
+                  >
+                    <Sparkles className={`w-3.5 h-3.5 ${autoTranscribeEnabled ? 'text-sky-600' : 'text-slate-400'}`} />
+                    <span>AI Assistant: {autoTranscribeEnabled ? 'ON' : 'OFF'}</span>
+                  </button>
+                )}
+              </div>
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3">
@@ -1041,6 +1061,55 @@ export const SimpleVideoView: React.FC = () => {
                       className="min-h-[40px] px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold shrink-0"
                     >
                       Join Call
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Upcoming Scheduled Meetings */}
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-bold text-slate-900">Upcoming Scheduled Meetings</h2>
+              <button
+                type="button"
+                onClick={() => setActiveTab('calendar')}
+                className="text-xs font-semibold text-sky-600 hover:text-sky-700 flex items-center gap-1"
+              >
+                <Calendar className="w-3.5 h-3.5" />
+                <span>Open Calendar</span>
+              </button>
+            </div>
+
+            {upcomingCalls.length === 0 ? (
+              <p className="text-xs text-slate-500 py-2">
+                No scheduled meetings yet. Open Calendar to pick a date and time.
+              </p>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {upcomingCalls.slice(0, 5).map(({ meeting, parsed, isVoice }) => (
+                  <div
+                    key={meeting.id}
+                    className="py-3 flex items-center justify-between gap-3"
+                  >
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-sky-700">
+                        {parsed ? parsed.displayFull : meeting.scheduledTime}
+                      </div>
+                      <div className="text-sm font-semibold text-slate-900 truncate">
+                        {meeting.title}
+                      </div>
+                      <div className="text-xs text-slate-500">
+                        {isVoice ? 'Voice Call' : 'Video Meeting'} · Organizer: {meeting.organizerName}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => joinVideoCall(meeting, isVoice ? 'voice' : 'video')}
+                      className="min-h-[38px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shrink-0"
+                    >
+                      Start Now
                     </button>
                   </div>
                 ))}

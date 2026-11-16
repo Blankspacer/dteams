@@ -38,6 +38,7 @@ export const TopNav: React.FC = () => {
   const navItems: Array<{ id: AppTab; label: string }> = [
     { id: 'chat', label: 'Chat' },
     { id: 'video', label: 'Calls' },
+    { id: 'calendar', label: 'Calendar' },
     { id: 'transcripts', label: 'AI Assistant' },
     { id: 'account', label: 'Account' },
   ];

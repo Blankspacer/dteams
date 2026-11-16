@@ -404,6 +404,14 @@ service cloud.firestore {
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time && (
           isAdmin() || (
+            existing().status == 'upcoming' &&
+            incoming().status == 'upcoming' &&
+            existing().organizerId == request.auth.uid &&
+            request.auth.uid in incoming().participantIds &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'title', 'scheduledTime', 'isPublic', 'participantIds', 'updatedAt'
+            ])
+          ) || (
             existing().status != 'completed' &&
             (existing().isPublic == true || request.auth.uid in existing().participantIds || existing().organizerId == request.auth.uid) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
