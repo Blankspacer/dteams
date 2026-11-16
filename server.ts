@@ -34,47 +34,230 @@ app.get('/api/app-info', (_req, res) => {
   });
 });
 
-async function summarizeTranscript(title: string, transcript: string) {
+interface ExtractedMeetingTask {
+  task: string;
+  assignedTo: string;
+  deadline: string;
+  completed: boolean;
+}
+
+interface MeetingMinutesResult {
+  summary: string;
+  discussionPoints: string[];
+  decisions: string[];
+  tasks: ExtractedMeetingTask[];
+  actionItems: string[];
+  momText: string;
+}
+
+function buildFallbackMomText(params: {
+  title: string;
+  organizerName?: string;
+  participantNames?: string[];
+  scheduledTime?: string;
+  summary: string;
+  discussionPoints: string[];
+  decisions: string[];
+  tasks: ExtractedMeetingTask[];
+}): string {
+  const attendees =
+    params.participantNames && params.participantNames.length > 0
+      ? params.participantNames.join(', ')
+      : params.organizerName || 'Team Members';
+  const lines: string[] = [
+    `MINUTES OF MEETING (MoM)`,
+    `Meeting: ${params.title}`,
+    `Date/Time: ${params.scheduledTime || new Date().toLocaleString()}`,
+    `Attendees: ${attendees}`,
+    '',
+    `EXECUTIVE SUMMARY`,
+    params.summary || 'Meeting completed.',
+    '',
+    `IMPORTANT DISCUSSION POINTS`,
+    ...(params.discussionPoints.length > 0
+      ? params.discussionPoints.map((d) => `- ${d}`)
+      : ['- General team updates and alignment']),
+    '',
+    `KEY DECISIONS`,
+    ...(params.decisions.length > 0
+      ? params.decisions.map((d) => `- ${d}`)
+      : ['- No formal decisions recorded.']),
+    '',
+    `ACTION ITEMS & RESPONSIBILITIES`,
+    ...(params.tasks.length > 0
+      ? params.tasks.map(
+          (t, i) =>
+            `${i + 1}. Task: ${t.task} | Assigned to: ${t.assignedTo} | Deadline: ${t.deadline}`
+        )
+      : ['- No specific action items assigned.']),
+  ];
+  return lines.join('\n').slice(0, 20000);
+}
+
+async function summarizeTranscript(
+  title: string,
+  transcript: string,
+  options?: {
+    organizerName?: string;
+    participantNames?: string[];
+    scheduledTime?: string;
+  }
+): Promise<MeetingMinutesResult> {
+  const safeTitle = (title || 'Team Meeting').slice(0, 150);
+  const participantList =
+    Array.isArray(options?.participantNames) && options.participantNames.length > 0
+      ? options.participantNames.slice(0, 20)
+      : [];
+
   if (!process.env.GEMINI_API_KEY) {
+    const tasks: ExtractedMeetingTask[] = [
+      {
+        task: 'Follow up on key meeting deliverables and share notes',
+        assignedTo: options?.organizerName || 'Team',
+        deadline: 'Next check-in',
+        completed: false,
+      },
+    ];
+    const summary = `Summary for "${safeTitle}": The team reviewed key priorities, aligned on decisions, and assigned next steps.`;
+    const discussionPoints = [`Key topics discussed in ${safeTitle}.`];
+    const decisions = ['Confirmed next milestones and responsibilities.'];
+    const actionItems = tasks.map(
+      (t) => `${t.task} — Assigned to: ${t.assignedTo} (Deadline: ${t.deadline})`
+    );
     return {
-      summary: `Summary for "${title}": The team aligned on milestones, next deliverables, and immediate action items.`,
-      decisions: ['Confirmed key timeline and assigned next steps to owners.'],
-      actionItems: ['Share notes with the team and follow up on action owners.'],
+      summary,
+      discussionPoints,
+      decisions,
+      tasks,
+      actionItems,
+      momText: buildFallbackMomText({
+        title: safeTitle,
+        organizerName: options?.organizerName,
+        participantNames: participantList,
+        scheduledTime: options?.scheduledTime,
+        summary,
+        discussionPoints,
+        decisions,
+        tasks,
+      }),
     };
   }
 
+  const participantsContext =
+    participantList.length > 0 ? `\nParticipants: ${participantList.join(', ')}` : '';
+  const todayContext = `Current date: ${new Date().toDateString()}`;
+
   const response = await ai.models.generateContent({
     model: 'gemini-4-hydrogen',
-    contents: `Analyze this call or meeting transcript and produce clear, concise meeting minutes.\n\nMeeting Title: ${title}\nTranscript:\n${transcript}`,
+    contents: `You are an AI Meeting Assistant. Analyze this meeting transcript carefully and extract structured Meeting Minutes (MoM).\n\n${todayContext}\nMeeting Title: ${safeTitle}${participantsContext}\nTranscript:\n${transcript}`,
     config: {
       systemInstruction:
-        'You summarize internal office calls and meetings cleanly and concisely in JSON.',
+        'You are a precision AI Meeting Assistant for team meetings. Extract concise executive summaries, important discussion points, clear decisions, actionable tasks with who is responsible (assignedTo) and deadlines, and a well-formatted formal Minutes of Meeting (MoM) text in JSON. If an owner or deadline is not explicitly stated, infer reasonably from context or use "Team" / "TBD".',
       responseMimeType: 'application/json',
       responseSchema: {
         type: Type.OBJECT,
         properties: {
           summary: {
             type: Type.STRING,
-            description: '2-3 sentence summary of key discussion and outcomes.',
+            description: '2-3 sentence executive summary of the meeting discussion and outcomes.',
+          },
+          discussionPoints: {
+            type: Type.ARRAY,
+            items: { type: Type.STRING },
+            description: 'Important discussion points covered during the meeting.',
           },
           decisions: {
             type: Type.ARRAY,
             items: { type: Type.STRING },
-            description: 'Key decisions made during the call or meeting.',
+            description: 'Key decisions approved or finalized during the meeting.',
           },
-          actionItems: {
+          tasks: {
             type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Clear action items with owner if mentioned.',
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                task: {
+                  type: Type.STRING,
+                  description: 'Clear description of the action item or task.',
+                },
+                assignedTo: {
+                  type: Type.STRING,
+                  description: 'Person, role, or team responsible for completing the task.',
+                },
+                deadline: {
+                  type: Type.STRING,
+                  description: 'Target due date or timeframe mentioned (or "TBD" if none stated).',
+                },
+              },
+              required: ['task', 'assignedTo', 'deadline'],
+            },
+            description: 'Structured action items with responsible owner and deadline.',
+          },
+          momText: {
+            type: Type.STRING,
+            description:
+              'Complete, formatted plain-text Minutes of Meeting (MoM) including Title, Attendees, Summary, Discussion Points, Decisions, and Action Items with Assignee and Deadline.',
           },
         },
-        required: ['summary', 'decisions', 'actionItems'],
+        required: ['summary', 'discussionPoints', 'decisions', 'tasks', 'momText'],
       },
     },
   });
 
   const text = (response.text ?? '{}').trim();
-  return JSON.parse(text);
+  const parsed = JSON.parse(text);
+
+  const discussionPoints: string[] = Array.isArray(parsed.discussionPoints)
+    ? parsed.discussionPoints
+        .map((item: unknown) => String(item || '').trim().slice(0, 500))
+        .filter(Boolean)
+        .slice(0, 30)
+    : [];
+
+  const decisions: string[] = Array.isArray(parsed.decisions)
+    ? parsed.decisions
+        .map((item: unknown) => String(item || '').trim().slice(0, 500))
+        .filter(Boolean)
+        .slice(0, 30)
+    : [];
+
+  const rawTasks = Array.isArray(parsed.tasks) ? parsed.tasks : [];
+  const tasks: ExtractedMeetingTask[] = rawTasks
+    .slice(0, 30)
+    .map((item: any) => ({
+      task: String(item?.task || '').trim().slice(0, 500),
+      assignedTo: String(item?.assignedTo || 'Unassigned').trim().slice(0, 120) || 'Unassigned',
+      deadline: String(item?.deadline || 'TBD').trim().slice(0, 80) || 'TBD',
+      completed: false,
+    }))
+    .filter((t: ExtractedMeetingTask) => t.task.length > 0);
+
+  const actionItems: string[] = tasks.map((t) =>
+    `${t.task} — Assigned to: ${t.assignedTo} (Deadline: ${t.deadline})`.slice(0, 500)
+  );
+
+  const summary = String(parsed.summary || '').trim().slice(0, 5000);
+  const momText =
+    String(parsed.momText || '').trim().slice(0, 20000) ||
+    buildFallbackMomText({
+      title: safeTitle,
+      organizerName: options?.organizerName,
+      participantNames: participantList,
+      scheduledTime: options?.scheduledTime,
+      summary,
+      discussionPoints,
+      decisions,
+      tasks,
+    });
+
+  return {
+    summary,
+    discussionPoints,
+    decisions,
+    tasks,
+    actionItems,
+    momText,
+  };
 }
 
 function normalizeAudioMimeType(raw?: string): string {
@@ -85,10 +268,18 @@ function normalizeAudioMimeType(raw?: string): string {
   return base;
 }
 
-// Transcribe any call/meeting audio using gemini-3.5-transcribe + summarize with gemini-4-hydrogen
+// Transcribe any call/meeting audio using gemini-3.5-transcribe + generate AI MoM with gemini-4-hydrogen
 app.post('/api/ai/transcribe-meeting', async (req, res) => {
   try {
-    const { audioBase64, mimeType, meetingTitle, participantNames, liveNotes } = req.body;
+    const {
+      audioBase64,
+      mimeType,
+      meetingTitle,
+      participantNames,
+      organizerName,
+      scheduledTime,
+      liveNotes,
+    } = req.body;
     const fallbackNotes = typeof liveNotes === 'string' ? liveNotes.trim() : '';
 
     if ((!audioBase64 || typeof audioBase64 !== 'string') && !fallbackNotes) {
@@ -97,15 +288,14 @@ app.post('/api/ai/transcribe-meeting', async (req, res) => {
 
     if (!process.env.GEMINI_API_KEY) {
       if (fallbackNotes) {
-        const minutes = await summarizeTranscript(
-          meetingTitle || 'Team Call',
-          fallbackNotes
-        );
+        const minutes = await summarizeTranscript(meetingTitle || 'Team Call', fallbackNotes, {
+          organizerName,
+          participantNames,
+          scheduledTime,
+        });
         return res.json({
           transcriptText: fallbackNotes,
-          summary: minutes.summary,
-          decisions: minutes.decisions,
-          actionItems: minutes.actionItems,
+          ...minutes,
         });
       }
       return res.status(503).json({
@@ -157,21 +347,23 @@ app.post('/api/ai/transcribe-meeting', async (req, res) => {
       return res.json({
         transcriptText: 'No speech detected in the call recording.',
         summary: 'No spoken content was detected to summarize.',
+        discussionPoints: [],
         decisions: [],
+        tasks: [],
         actionItems: [],
+        momText: '',
       });
     }
 
-    const minutes = await summarizeTranscript(
-      meetingTitle || 'Team Call',
-      transcriptText
-    );
+    const minutes = await summarizeTranscript(meetingTitle || 'Team Call', transcriptText, {
+      organizerName,
+      participantNames,
+      scheduledTime,
+    });
 
     return res.json({
       transcriptText,
-      summary: minutes.summary || '',
-      decisions: Array.isArray(minutes.decisions) ? minutes.decisions : [],
-      actionItems: Array.isArray(minutes.actionItems) ? minutes.actionItems : [],
+      ...minutes,
     });
   } catch (error: any) {
     console.error('Error transcribing meeting audio:', error);
@@ -181,26 +373,31 @@ app.post('/api/ai/transcribe-meeting', async (req, res) => {
   }
 });
 
-// Summarize text transcript / live call notes into meeting minutes
+// Summarize text transcript / live call notes into AI Meeting Minutes (MoM)
 app.post('/api/ai/meeting-minutes', async (req, res) => {
   try {
-    const { meetingTitle, transcriptText } = req.body;
+    const {
+      meetingTitle,
+      transcriptText,
+      participantNames,
+      organizerName,
+      scheduledTime,
+    } = req.body;
     const text = String(transcriptText || '').trim();
 
     if (!text) {
       return res.status(400).json({ error: 'Transcript text is required.' });
     }
 
-    const minutes = await summarizeTranscript(
-      meetingTitle || 'Team Meeting',
-      text
-    );
+    const minutes = await summarizeTranscript(meetingTitle || 'Team Meeting', text, {
+      organizerName,
+      participantNames,
+      scheduledTime,
+    });
 
     return res.json({
       transcriptText: text,
-      summary: minutes.summary || '',
-      decisions: Array.isArray(minutes.decisions) ? minutes.decisions : [],
-      actionItems: Array.isArray(minutes.actionItems) ? minutes.actionItems : [],
+      ...minutes,
     });
   } catch (error: any) {
     console.error('Error generating meeting minutes:', error);

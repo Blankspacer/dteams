@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import {
+  Phone,
   Video,
   VideoOff,
   Mic,
@@ -7,6 +8,7 @@ import {
   MonitorUp,
   PhoneOff,
   Circle,
+  Square,
   Users,
   Subtitles,
   Loader2,
@@ -14,6 +16,8 @@ import {
   Check,
   X,
   Sparkles,
+  Download,
+  Volume2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AddMemberModal } from '../common/AddMemberModal';
@@ -21,22 +25,10 @@ import { UserStatusBadge } from '../common/UserStatusBadge';
 import { sounds } from '../../utils/audio';
 import { useWebRTCCall } from '../../hooks/useWebRTCCall';
 import { getEffectiveUserStatus, sortUsersByPresence } from '../../utils/presence';
+import { downloadTranscriptText, pickSupportedAudioMimeType } from '../../utils/transcript';
+import { MeetingRecord } from '../../types';
 
 const AUTO_TRANSCRIBE_STORAGE_KEY = 'spherecall_auto_transcribe';
-
-function pickSupportedAudioMimeType(): string {
-  if (typeof MediaRecorder === 'undefined') return '';
-  const candidates = [
-    'audio/webm;codecs=opus',
-    'audio/webm',
-    'audio/mp4',
-    'audio/ogg;codecs=opus',
-  ];
-  for (const type of candidates) {
-    if (MediaRecorder.isTypeSupported?.(type)) return type;
-  }
-  return '';
-}
 
 function readBlobAsDataUrl(blob: Blob): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -53,12 +45,19 @@ const RemoteParticipantTile: React.FC<{
   stream?: MediaStream;
 }> = ({ displayName, avatar, stream }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
   const [hasVideo, setHasVideo] = useState(false);
 
   useEffect(() => {
     if (!stream) {
       setHasVideo(false);
+      if (audioRef.current) audioRef.current.srcObject = null;
+      if (videoRef.current) videoRef.current.srcObject = null;
       return;
+    }
+    if (audioRef.current) {
+      audioRef.current.srcObject = stream;
+      audioRef.current.play?.().catch(() => {});
     }
     if (videoRef.current) {
       videoRef.current.srcObject = stream;
@@ -78,31 +77,45 @@ const RemoteParticipantTile: React.FC<{
 
   return (
     <div className="aspect-video bg-slate-800 rounded-2xl overflow-hidden border border-slate-700 relative flex items-center justify-center">
+      {stream && <audio ref={audioRef} autoPlay playsInline className="sr-only" />}
       {stream && (
         <video
           ref={videoRef}
           autoPlay
           playsInline
+          muted
           className={`w-full h-full object-cover ${hasVideo ? 'block' : 'hidden'}`}
         />
       )}
       {!hasVideo && (
         <div className="flex flex-col items-center gap-2">
-          {avatar ? (
-            <img
-              src={avatar}
-              alt={displayName}
-              referrerPolicy="no-referrer"
-              className="w-16 h-16 rounded-full object-cover border-2 border-slate-600"
-            />
-          ) : (
-            <div className="w-16 h-16 rounded-full bg-slate-700 flex items-center justify-center text-xl font-bold">
-              {displayName.slice(0, 2).toUpperCase()}
-            </div>
-          )}
+          <div className="relative">
+            {stream && (
+              <span className="absolute -inset-1.5 rounded-full border-2 border-emerald-400/50 animate-pulse" />
+            )}
+            {avatar ? (
+              <img
+                src={avatar}
+                alt={displayName}
+                referrerPolicy="no-referrer"
+                className="relative w-16 h-16 rounded-full object-cover border-2 border-slate-600"
+              />
+            ) : (
+              <div className="relative w-16 h-16 rounded-full bg-slate-700 flex items-center justify-center text-xl font-bold">
+                {displayName.slice(0, 2).toUpperCase()}
+              </div>
+            )}
+          </div>
           <span className="text-sm font-semibold">{displayName}</span>
-          <span className="text-[11px] text-slate-400">
-            {stream ? 'Connected (Audio)' : 'Ringing...'}
+          <span className="text-[11px] text-slate-400 flex items-center gap-1">
+            {stream ? (
+              <>
+                <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
+                <span>Voice connected</span>
+              </>
+            ) : (
+              <span>Ringing...</span>
+            )}
           </span>
         </div>
       )}
@@ -123,6 +136,7 @@ export const SimpleVideoView: React.FC = () => {
     teamUsers,
     meetings,
     activeMeeting,
+    activeCallMode,
     startVideoCall,
     joinVideoCall,
     addCallParticipants,
@@ -151,10 +165,13 @@ export const SimpleVideoView: React.FC = () => {
     }
   });
   const [isRecording, setIsRecording] = useState(false);
+  const [recordSeconds, setRecordSeconds] = useState(0);
   const [showCaptions, setShowCaptions] = useState(true);
   const [callSeconds, setCallSeconds] = useState(0);
   const [liveTranscript, setLiveTranscript] = useState<string>('');
   const [savingTranscript, setSavingTranscript] = useState(false);
+  const [processingClip, setProcessingClip] = useState(false);
+  const [savedClipRecord, setSavedClipRecord] = useState<MeetingRecord | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
 
@@ -226,6 +243,16 @@ export const SimpleVideoView: React.FC = () => {
     const interval = setInterval(() => setCallSeconds((s) => s + 1), 1000);
     return () => clearInterval(interval);
   }, [activeMeeting?.id]);
+
+  // Active recording timer
+  useEffect(() => {
+    if (!isRecording) {
+      setRecordSeconds(0);
+      return;
+    }
+    const interval = setInterval(() => setRecordSeconds((s) => s + 1), 1000);
+    return () => clearInterval(interval);
+  }, [isRecording]);
 
   // Play gentle outgoing ringback tone while waiting for called member to answer
   useEffect(() => {
@@ -312,6 +339,7 @@ export const SimpleVideoView: React.FC = () => {
     const blob = new Blob(audioChunksRef.current, {
       type: recorderMimeRef.current || 'audio/webm',
     });
+    audioChunksRef.current = [];
     return blob.size > 512 ? blob : null;
   };
 
@@ -422,15 +450,28 @@ export const SimpleVideoView: React.FC = () => {
   };
 
   const transcribeAndSaveCall = async (params: {
-    meetingId: string;
+    meetingId?: string;
     meetingTitle: string;
     participantNames: string[];
+    participantIds?: string[];
+    isPublic?: boolean;
     audioBlob: Blob | null;
     liveNotes: string;
-  }) => {
-    const { meetingId, meetingTitle, participantNames, audioBlob, liveNotes } = params;
+  }): Promise<MeetingRecord | null> => {
+    const {
+      meetingId,
+      meetingTitle,
+      participantNames,
+      participantIds,
+      isPublic,
+      audioBlob,
+      liveNotes,
+    } = params;
     const trimmedNotes = liveNotes.trim();
-    if (!audioBlob && !trimmedNotes) return false;
+    if (!audioBlob && !trimmedNotes) return null;
+
+    const scheduledTime = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const organizerName = currentProfile?.displayName || 'Member';
 
     if (audioBlob) {
       const base64 = await readBlobAsDataUrl(audioBlob);
@@ -442,21 +483,44 @@ export const SimpleVideoView: React.FC = () => {
           mimeType: audioBlob.type || 'audio/webm',
           meetingTitle,
           participantNames,
+          organizerName,
+          scheduledTime,
           liveNotes: trimmedNotes,
         }),
       });
 
       if (resp.ok) {
         const data = await resp.json();
-        await saveMeetingTranscript({
+        const savedId = await saveMeetingTranscript({
           meetingId,
           title: meetingTitle,
           transcriptText: data.transcriptText || trimmedNotes,
           aiSummary: data.summary || '',
+          discussionPoints: data.discussionPoints || [],
           decisions: data.decisions || [],
           actionItems: data.actionItems || [],
+          tasks: data.tasks || [],
+          momText: data.momText || '',
+          isPublic,
+          participantIds,
         });
-        return true;
+        return {
+          id: savedId,
+          title: meetingTitle,
+          organizerId: firebaseUser?.uid || '',
+          organizerName,
+          status: 'completed',
+          scheduledTime,
+          isPublic: isPublic ?? true,
+          participantIds: participantIds || (firebaseUser ? [firebaseUser.uid] : []),
+          transcriptText: data.transcriptText || trimmedNotes,
+          aiSummary: data.summary || '',
+          discussionPoints: data.discussionPoints || [],
+          decisions: data.decisions || [],
+          actionItems: data.actionItems || [],
+          tasks: data.tasks || [],
+          momText: data.momText || '',
+        };
       }
       const errData = await resp.json().catch(() => ({}));
       if (!trimmedNotes) {
@@ -471,23 +535,47 @@ export const SimpleVideoView: React.FC = () => {
         body: JSON.stringify({
           meetingTitle,
           transcriptText: trimmedNotes,
+          participantNames,
+          organizerName,
+          scheduledTime,
         }),
       });
       if (resp.ok) {
         const data = await resp.json();
-        await saveMeetingTranscript({
+        const savedId = await saveMeetingTranscript({
           meetingId,
           title: meetingTitle,
           transcriptText: trimmedNotes,
           aiSummary: data.summary || '',
+          discussionPoints: data.discussionPoints || [],
           decisions: data.decisions || [],
           actionItems: data.actionItems || [],
+          tasks: data.tasks || [],
+          momText: data.momText || '',
+          isPublic,
+          participantIds,
         });
-        return true;
+        return {
+          id: savedId,
+          title: meetingTitle,
+          organizerId: firebaseUser?.uid || '',
+          organizerName,
+          status: 'completed',
+          scheduledTime,
+          isPublic: isPublic ?? true,
+          participantIds: participantIds || (firebaseUser ? [firebaseUser.uid] : []),
+          transcriptText: trimmedNotes,
+          aiSummary: data.summary || '',
+          discussionPoints: data.discussionPoints || [],
+          decisions: data.decisions || [],
+          actionItems: data.actionItems || [],
+          tasks: data.tasks || [],
+          momText: data.momText || '',
+        };
       }
     }
 
-    return false;
+    return null;
   };
 
   // Wire any newly connected remote caller audio tracks into the call mixer dynamically
@@ -498,37 +586,70 @@ export const SimpleVideoView: React.FC = () => {
     });
   }, [remoteStreams, isRecording]);
 
-  // Acquire camera + mic when joining/starting a call, and auto-start AI call transcription
+  // Acquire mic (and camera if in video call mode), and auto-start AI call transcription when enabled
   useEffect(() => {
     if (!activeMeeting) return;
     let cancelled = false;
     endingLocallyRef.current = false;
     setLiveTranscript('');
+    setSavedClipRecord(null);
+    setProcessingClip(false);
+    setIsMuted(false);
     audioChunksRef.current = [];
+    const wantVideo = activeCallMode === 'video';
+    setIsCameraOn(wantVideo);
 
     async function initMedia() {
       setMediaError(null);
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setMediaError('Microphone/camera API unavailable in this browser.');
+        return;
+      }
+
+      let stream: MediaStream | null = null;
+      let cameraFallback = false;
+
       try {
-        if (navigator.mediaDevices?.getUserMedia) {
-          const stream = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: true,
-          });
-          if (cancelled) {
-            stream.getTracks().forEach((t) => t.stop());
-            return;
-          }
-          localStreamRef.current = stream;
-          setLocalStream(stream);
-          if (localVideoRef.current) {
-            localVideoRef.current.srcObject = stream;
-          }
-          if (autoTranscribeEnabled && canRecord) {
-            startRecordingCapture();
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: wantVideo,
+          audio: true,
+        });
+      } catch {
+        if (wantVideo) {
+          try {
+            stream = await navigator.mediaDevices.getUserMedia({
+              video: false,
+              audio: true,
+            });
+            cameraFallback = true;
+          } catch {
+            stream = null;
           }
         }
-      } catch {
-        setMediaError('Camera or microphone permission unavailable. Audio/video preview is disabled.');
+      }
+
+      if (!stream) {
+        setMediaError('Microphone permission unavailable. Please allow microphone access to talk and record.');
+        return;
+      }
+
+      if (cancelled) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
+
+      if (cameraFallback) {
+        setIsCameraOn(false);
+        setMediaError('Camera unavailable — connected in Voice Call mode.');
+      }
+
+      localStreamRef.current = stream;
+      setLocalStream(stream);
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+      }
+      if (autoTranscribeEnabled && canRecord) {
+        startRecordingCapture();
       }
     }
 
@@ -582,11 +703,36 @@ export const SimpleVideoView: React.FC = () => {
     });
   };
 
-  const toggleCamera = () => {
+  const toggleCamera = async () => {
     const next = !isCameraOn;
+    const existingVideoTracks = localStreamRef.current?.getVideoTracks() || [];
+
+    if (next && existingVideoTracks.length === 0) {
+      // Voice call upgraded to video mid-call: acquire camera track dynamically
+      try {
+        const videoStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        const videoTrack = videoStream.getVideoTracks()[0];
+        if (videoTrack) {
+          const audioTracks = localStreamRef.current?.getAudioTracks() || [];
+          const combined = new MediaStream([...audioTracks, videoTrack]);
+          localStreamRef.current = combined;
+          setLocalStream(combined);
+          if (localVideoRef.current) {
+            localVideoRef.current.srcObject = combined;
+          }
+          setIsCameraOn(true);
+          sounds.playMuteClick(true);
+          return;
+        }
+      } catch {
+        setMediaError('Camera permission unavailable. Continuing in voice call mode.');
+        return;
+      }
+    }
+
     setIsCameraOn(next);
     sounds.playMuteClick(next);
-    localStreamRef.current?.getVideoTracks().forEach((t) => {
+    existingVideoTracks.forEach((t) => {
       t.enabled = next;
     });
   };
@@ -617,33 +763,43 @@ export const SimpleVideoView: React.FC = () => {
   };
 
   const toggleRecordingAndTranscript = async () => {
+    if (!canRecord || processingClip) return;
+
     if (isRecording) {
-      keepSpeechRunningRef.current = false;
+      // Stop recording immediately, transcribe the recorded audio/notes, and offer instant .txt download
+      setProcessingClip(true);
       try {
-        speechRecRef.current?.stop();
-      } catch {
-        // Ignore
-      }
-      if (recorderRef.current && recorderRef.current.state === 'recording') {
-        try {
-          recorderRef.current.pause();
-        } catch {
-          // Ignore if pause unsupported
+        const audioBlob = await stopRecordingCapture();
+        const notes = liveTranscriptRef.current;
+        if (activeMeeting && (audioBlob || notes.trim())) {
+          const participantNames = activeMeeting.participantIds
+            .map((uid) => teamUsers.find((u) => u.uid === uid)?.displayName)
+            .filter((n): n is string => Boolean(n));
+          const savedRecord = await transcribeAndSaveCall({
+            meetingTitle: `${activeMeeting.title} (${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })})`,
+            participantNames,
+            participantIds: activeMeeting.participantIds,
+            isPublic: activeMeeting.isPublic,
+            audioBlob,
+            liveNotes: notes,
+          });
+          if (savedRecord) {
+            setSavedClipRecord(savedRecord);
+            liveTranscriptRef.current = '';
+            setLiveTranscript('');
+          }
         }
+      } catch (err) {
+        setErrorBanner(
+          err instanceof Error ? err.message : 'Could not transcribe call recording.'
+        );
+      } finally {
+        setProcessingClip(false);
       }
-      setIsRecording(false);
       return;
     }
 
-    if (recorderRef.current && recorderRef.current.state === 'paused') {
-      try {
-        recorderRef.current.resume();
-        setIsRecording(true);
-        return;
-      } catch {
-        // Fall through to fresh capture
-      }
-    }
+    setSavedClipRecord(null);
     startRecordingCapture();
   };
 
@@ -696,7 +852,7 @@ export const SimpleVideoView: React.FC = () => {
     return `${m}:${s}`;
   };
 
-  // No active call -> Simple Call Launcher + Live Calls List
+  // No active call -> Voice & Video Call Launcher + Live Calls List
   if (!activeMeeting) {
     return (
       <div className="flex-1 overflow-y-auto bg-slate-50 p-4 sm:p-8">
@@ -704,9 +860,9 @@ export const SimpleVideoView: React.FC = () => {
           <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 space-y-5">
             <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
               <div className="space-y-1.5">
-                <h1 className="text-xl sm:text-2xl font-bold text-slate-900">Video Call</h1>
+                <h1 className="text-xl sm:text-2xl font-bold text-slate-900">Voice &amp; Video Calls</h1>
                 <p className="text-sm text-slate-500">
-                  Start an instant call with your team. AI automatically transcribes the conversation and generates minutes when the call ends.
+                  Start a voice call or video meeting. With AI Meeting Assistant enabled, calls are automatically transcribed into summaries, decisions, assigned tasks, and MoM.
                 </p>
               </div>
 
@@ -719,10 +875,10 @@ export const SimpleVideoView: React.FC = () => {
                       ? 'bg-sky-50 border-sky-200 text-sky-800'
                       : 'bg-slate-50 border-slate-200 text-slate-600'
                   }`}
-                  title="Automatically record and transcribe all calls with AI"
+                  title="Automatically transcribe calls and generate AI Meeting Minutes (MoM)"
                 >
                   <Sparkles className={`w-3.5 h-3.5 ${autoTranscribeEnabled ? 'text-sky-600' : 'text-slate-400'}`} />
-                  <span>Auto-Transcript: {autoTranscribeEnabled ? 'ON' : 'OFF'}</span>
+                  <span>AI Assistant: {autoTranscribeEnabled ? 'ON' : 'OFF'}</span>
                 </button>
               )}
             </div>
@@ -751,17 +907,40 @@ export const SimpleVideoView: React.FC = () => {
                     : 'Add People'}
                 </span>
               </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <button
+                type="button"
                 onClick={() => {
                   startVideoCall(
-                    callTitle.trim() || undefined,
-                    selectedCallMemberIds.length > 0 ? selectedCallMemberIds : undefined
+                    callTitle.trim() ? `Voice Call: ${callTitle.trim()}` : undefined,
+                    selectedCallMemberIds.length > 0 ? selectedCallMemberIds : undefined,
+                    'voice'
                   );
                   setCallTitle('');
                   setSelectedCallMemberIds([]);
                   setShowLauncherPicker(false);
                 }}
-                className="min-h-[44px] px-6 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors shrink-0"
+                className="min-h-[46px] px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
+              >
+                <Phone className="w-4 h-4" />
+                <span>Start Voice Call</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  startVideoCall(
+                    callTitle.trim() || undefined,
+                    selectedCallMemberIds.length > 0 ? selectedCallMemberIds : undefined,
+                    'video'
+                  );
+                  setCallTitle('');
+                  setSelectedCallMemberIds([]);
+                  setShowLauncherPicker(false);
+                }}
+                className="min-h-[46px] px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors"
               >
                 <Video className="w-4 h-4" />
                 <span>Start Video Call</span>
@@ -898,9 +1077,9 @@ export const SimpleVideoView: React.FC = () => {
 
         <div className="flex items-center gap-2.5 shrink-0">
           {isRecording && (
-            <div className="px-2.5 py-1 rounded-lg bg-rose-500/15 border border-rose-500/30 flex items-center gap-1.5 text-xs font-semibold text-rose-300">
+            <div className="px-2.5 py-1 rounded-lg bg-rose-500/15 border border-rose-500/30 flex items-center gap-1.5 text-xs font-semibold text-rose-300 tabular-nums">
               <Circle className="w-2.5 h-2.5 fill-rose-500 text-rose-500 animate-pulse" />
-              <span className="hidden sm:inline">AI Auto-Transcript</span>
+              <span>AI MoM · REC {formatTimer(recordSeconds)}</span>
             </div>
           )}
 
@@ -918,11 +1097,40 @@ export const SimpleVideoView: React.FC = () => {
         </div>
       </div>
 
-      {/* Video Stage */}
+      {/* Video / Voice Stage */}
       <div className="flex-1 p-3 sm:p-6 overflow-y-auto flex flex-col gap-4 items-center justify-center relative">
         {mediaError && (
           <div className="px-4 py-2 rounded-xl bg-amber-500/20 border border-amber-500/40 text-amber-200 text-xs">
             {mediaError}
+          </div>
+        )}
+
+        {savedClipRecord && (
+          <div className="w-full max-w-2xl px-4 py-3 rounded-xl bg-emerald-950/90 border border-emerald-500/40 text-emerald-100 text-xs flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 min-w-0">
+              <Sparkles className="w-4 h-4 text-emerald-400 shrink-0" />
+              <span className="font-semibold truncate">
+                Recording transcribed and saved!
+              </span>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => downloadTranscriptText(savedClipRecord)}
+                className="min-h-[34px] px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold flex items-center gap-1.5 transition-colors"
+              >
+                <Download className="w-3.5 h-3.5" />
+                <span>Download (.txt)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setSavedClipRecord(null)}
+                className="p-1.5 text-emerald-300 hover:text-white"
+                aria-label="Dismiss"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         )}
 
@@ -944,19 +1152,29 @@ export const SimpleVideoView: React.FC = () => {
                 />
               ) : (
                 <div className="flex flex-col items-center gap-2">
-                  {currentProfile?.avatar ? (
-                    <img
-                      src={currentProfile.avatar}
-                      alt={currentProfile.displayName}
-                      referrerPolicy="no-referrer"
-                      className="w-16 h-16 rounded-full object-cover border-2 border-slate-600"
-                    />
-                  ) : (
-                    <div className="w-16 h-16 rounded-full bg-sky-600 flex items-center justify-center text-xl font-bold">
-                      {(currentProfile?.displayName || 'Y').slice(0, 2).toUpperCase()}
-                    </div>
-                  )}
-                  <span className="text-xs text-slate-300">Camera off</span>
+                  <div className="relative">
+                    {!isMuted && (
+                      <span className="absolute -inset-1.5 rounded-full border-2 border-sky-400/50 animate-pulse" />
+                    )}
+                    {currentProfile?.avatar ? (
+                      <img
+                        src={currentProfile.avatar}
+                        alt={currentProfile.displayName}
+                        referrerPolicy="no-referrer"
+                        className="relative w-16 h-16 rounded-full object-cover border-2 border-slate-600"
+                      />
+                    ) : (
+                      <div className="relative w-16 h-16 rounded-full bg-sky-600 flex items-center justify-center text-xl font-bold">
+                        {(currentProfile?.displayName || 'Y').slice(0, 2).toUpperCase()}
+                      </div>
+                    )}
+                  </div>
+                  <span className="text-sm font-semibold">
+                    {currentProfile?.displayName || 'You'}
+                  </span>
+                  <span className="text-[11px] text-slate-400">
+                    {activeCallMode === 'voice' ? 'Voice Call (Audio only)' : 'Camera off'}
+                  </span>
                 </div>
               )}
               <div className="absolute bottom-3 left-3 px-2.5 py-1 rounded-lg bg-black/60 text-xs font-medium">
@@ -985,9 +1203,11 @@ export const SimpleVideoView: React.FC = () => {
               liveTranscript.split('\n').slice(-3).join(' · ')
             ) : (
               <span className="text-slate-400">
-                {isRecording
-                  ? 'AI auto-transcript is listening — full transcript and meeting minutes will be saved automatically when the call ends.'
-                  : 'AI transcription is paused. Tap AI Rec below to resume capturing.'}
+                {processingClip
+                  ? 'AI Meeting Assistant is generating MoM and action items...'
+                  : isRecording
+                  ? 'AI Meeting Assistant active — automatically capturing transcript, decisions, and tasks.'
+                  : 'Tap Record below to capture this call and generate AI Meeting Minutes (.txt).'}
               </span>
             )}
           </div>
@@ -995,7 +1215,7 @@ export const SimpleVideoView: React.FC = () => {
       </div>
 
       {/* Bottom Controls */}
-      <div className="bg-slate-950 border-t border-slate-800 px-4 py-3 flex items-center justify-center gap-2 sm:gap-3 shrink-0">
+      <div className="bg-slate-950 border-t border-slate-800 px-3 sm:px-4 py-3 flex flex-wrap items-center justify-center gap-2 sm:gap-3 shrink-0">
         <button
           onClick={toggleMic}
           className={`min-h-[48px] min-w-[48px] px-3.5 rounded-xl flex items-center justify-center gap-2 text-xs font-semibold transition-colors ${
@@ -1010,12 +1230,13 @@ export const SimpleVideoView: React.FC = () => {
         <button
           onClick={toggleCamera}
           className={`min-h-[48px] min-w-[48px] px-3.5 rounded-xl flex items-center justify-center gap-2 text-xs font-semibold transition-colors ${
-            !isCameraOn ? 'bg-rose-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-100'
+            !isCameraOn ? 'bg-slate-800 hover:bg-slate-700 text-slate-300' : 'bg-slate-800 hover:bg-slate-700 text-slate-100'
           }`}
           aria-label={isCameraOn ? 'Turn Camera Off' : 'Turn Camera On'}
+          title={isCameraOn ? 'Turn Camera Off' : 'Turn Camera On'}
         >
           {isCameraOn ? <Video className="w-5 h-5" /> : <VideoOff className="w-5 h-5" />}
-          <span className="hidden sm:inline">{isCameraOn ? 'Camera' : 'Off'}</span>
+          <span className="hidden sm:inline">{isCameraOn ? 'Camera' : 'Video Off'}</span>
         </button>
 
         <button
@@ -1030,14 +1251,30 @@ export const SimpleVideoView: React.FC = () => {
 
         <button
           onClick={toggleRecordingAndTranscript}
-          disabled={!canRecord}
-          className={`min-h-[48px] min-w-[48px] px-3.5 rounded-xl flex items-center justify-center gap-2 text-xs font-semibold transition-colors disabled:opacity-40 ${
-            isRecording ? 'bg-rose-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-100'
+          disabled={!canRecord || processingClip}
+          className={`min-h-[48px] px-3.5 rounded-xl flex items-center justify-center gap-2 text-xs font-semibold transition-colors disabled:opacity-50 ${
+            isRecording
+              ? 'bg-rose-600 hover:bg-rose-700 text-white'
+              : 'bg-slate-800 hover:bg-slate-700 text-slate-100'
           }`}
-          title={isRecording ? 'Pause AI auto-transcript' : 'Start AI auto-transcript'}
+          title={isRecording ? 'Stop recording and create downloadable transcript' : 'Record call and transcribe'}
         >
-          <Circle className={`w-4 h-4 ${isRecording ? 'fill-white' : 'text-rose-400'}`} />
-          <span className="hidden sm:inline">{isRecording ? 'AI Rec ON' : 'AI Rec'}</span>
+          {processingClip ? (
+            <>
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>Saving...</span>
+            </>
+          ) : isRecording ? (
+            <>
+              <Square className="w-4 h-4 fill-white" />
+              <span>Stop Record</span>
+            </>
+          ) : (
+            <>
+              <Circle className="w-4 h-4 fill-rose-500 text-rose-500" />
+              <span>Record</span>
+            </>
+          )}
         </button>
 
         <button

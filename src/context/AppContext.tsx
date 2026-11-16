@@ -32,6 +32,7 @@ import {
   ChatMessage,
   Conversation,
   MeetingRecord,
+  MeetingTask,
   TeamInvite,
   UserContact,
   UserProfile,
@@ -40,6 +41,7 @@ import {
 } from '../types';
 import { encryptE2EEMessage, generateUserFingerprint } from '../utils/crypto';
 import { sounds } from '../utils/audio';
+import { formatMoMForChat } from '../utils/transcript';
 
 interface AppContextType {
   firebaseUser: FirebaseUser | null;
@@ -54,6 +56,7 @@ interface AppContextType {
   messages: ChatMessage[];
   meetings: MeetingRecord[];
   activeMeeting: MeetingRecord | null;
+  activeCallMode: 'voice' | 'video';
   incomingCall: MeetingRecord | null;
   activeTab: AppTab;
   errorBanner: string | null;
@@ -61,6 +64,7 @@ interface AppContextType {
   lastTranscribedMeetingId: string | null;
 
   setActiveTab: (tab: AppTab) => void;
+  setActiveCallMode: (mode: 'voice' | 'video') => void;
   setActiveConversationId: (id: string) => void;
   setErrorBanner: (msg: string | null) => void;
   setLastTranscribedMeetingId: (id: string | null) => void;
@@ -96,9 +100,13 @@ interface AppContextType {
   ) => Promise<void>;
   removeMessage: (messageId: string) => Promise<void>;
 
-  startVideoCall: (title?: string, participantIds?: string[]) => Promise<MeetingRecord | null>;
-  joinVideoCall: (meeting: MeetingRecord) => Promise<void>;
-  answerIncomingCall: (meeting: MeetingRecord) => Promise<void>;
+  startVideoCall: (
+    title?: string,
+    participantIds?: string[],
+    mode?: 'voice' | 'video'
+  ) => Promise<MeetingRecord | null>;
+  joinVideoCall: (meeting: MeetingRecord, mode?: 'voice' | 'video') => Promise<void>;
+  answerIncomingCall: (meeting: MeetingRecord, mode?: 'voice' | 'video') => Promise<void>;
   declineIncomingCall: (meeting: MeetingRecord) => Promise<void>;
   addCallParticipants: (meetingId: string, participantIds: string[]) => Promise<void>;
   endVideoCall: (meetingId: string, transcriptText?: string) => Promise<void>;
@@ -114,9 +122,16 @@ interface AppContextType {
     title: string;
     transcriptText: string;
     aiSummary: string;
+    discussionPoints?: string[];
     decisions: string[];
     actionItems: string[];
+    tasks?: MeetingTask[];
+    momText?: string;
+    isPublic?: boolean;
+    participantIds?: string[];
   }) => Promise<string>;
+  toggleMeetingTask: (meetingId: string, taskIndex: number) => Promise<void>;
+  postMomToChat: (meeting: MeetingRecord, conversationId?: string) => Promise<boolean>;
   deleteMeetingRecord: (meetingId: string) => Promise<void>;
 }
 
@@ -144,6 +159,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
   const [activeMeeting, setActiveMeeting] = useState<MeetingRecord | null>(null);
+  const [activeCallMode, setActiveCallMode] = useState<'voice' | 'video'>('video');
   const [dismissedCallIds, setDismissedCallIds] = useState<string[]>([]);
   const [activeTab, setActiveTab] = useState<AppTab>('chat');
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
@@ -177,6 +193,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setMessages([]);
         setMeetings([]);
         setActiveMeeting(null);
+        setActiveCallMode('video');
         setDismissedCallIds([]);
         setActiveConversationId('');
       }
@@ -937,7 +954,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const startVideoCall = async (
     title?: string,
-    participantIds?: string[]
+    participantIds?: string[],
+    mode: 'voice' | 'video' = 'video'
   ): Promise<MeetingRecord | null> => {
     if (!firebaseUser) return null;
     const meetingId = `meet-${Date.now().toString(36)}`;
@@ -946,8 +964,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       new Set([firebaseUser.uid, ...(participantIds || [])])
     ).slice(0, 50);
 
+    const defaultTitle =
+      mode === 'voice'
+        ? `${currentProfile?.displayName || 'Team'} Voice Call`
+        : `${currentProfile?.displayName || 'Team'} Video Call`;
+
     const record: Omit<MeetingRecord, 'id'> = {
-      title: (title || `${currentProfile?.displayName || 'Team'} Video Call`).slice(0, 150),
+      title: (title || defaultTitle).slice(0, 150),
       organizerId: firebaseUser.uid,
       organizerName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
       status: 'live',
@@ -956,8 +979,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       participantIds: participants,
       transcriptText: '',
       aiSummary: '',
+      discussionPoints: [],
       decisions: [],
       actionItems: [],
+      tasks: [],
+      momText: '',
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
     };
@@ -965,6 +991,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       await setDoc(doc(db, 'meetings', meetingId), record);
       const created: MeetingRecord = { id: meetingId, ...record };
+      setActiveCallMode(mode);
       setActiveMeeting(created);
       setActiveTab('video');
       sounds.playJoinMeeting();
@@ -974,12 +1001,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const joinVideoCall = async (meeting: MeetingRecord) => {
+  const joinVideoCall = async (meeting: MeetingRecord, mode?: 'voice' | 'video') => {
     if (!firebaseUser) return;
     setDismissedCallIds((prev) => (prev.includes(meeting.id) ? prev : [...prev, meeting.id]));
     const updatedParticipants = Array.from(
       new Set([...meeting.participantIds, firebaseUser.uid])
     ).slice(0, 50);
+    const inferredMode: 'voice' | 'video' =
+      mode || (meeting.title.toLowerCase().includes('voice') ? 'voice' : 'video');
     const path = `meetings/${meeting.id}`;
     try {
       await updateDoc(doc(db, 'meetings', meeting.id), {
@@ -987,6 +1016,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         participantIds: updatedParticipants,
         updatedAt: serverTimestamp(),
       });
+      setActiveCallMode(inferredMode);
       setActiveMeeting({ ...meeting, status: 'live', participantIds: updatedParticipants });
       setActiveTab('video');
       sounds.playJoinMeeting();
@@ -995,8 +1025,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const answerIncomingCall = async (meeting: MeetingRecord) => {
-    await joinVideoCall(meeting);
+  const answerIncomingCall = async (meeting: MeetingRecord, mode?: 'voice' | 'video') => {
+    await joinVideoCall(meeting, mode);
   };
 
   const declineIncomingCall = async (meeting: MeetingRecord) => {
@@ -1124,12 +1154,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     title: string;
     transcriptText: string;
     aiSummary: string;
+    discussionPoints?: string[];
     decisions: string[];
     actionItems: string[];
+    tasks?: MeetingTask[];
+    momText?: string;
+    isPublic?: boolean;
+    participantIds?: string[];
   }): Promise<string> => {
     if (!firebaseUser) return '';
     let targetMeetingId = data.meetingId || `meet-${Date.now().toString(36)}`;
     let path = `meetings/${targetMeetingId}`;
+    const resolvedIsPublic = data.isPublic ?? true;
+    const resolvedParticipants =
+      data.participantIds && data.participantIds.length > 0
+        ? Array.from(new Set([firebaseUser.uid, ...data.participantIds])).slice(0, 50)
+        : [firebaseUser.uid];
+
+    const cleanDiscussionPoints = (data.discussionPoints || [])
+      .map((item) => String(item || '').trim().slice(0, 500))
+      .filter(Boolean)
+      .slice(0, 30);
+    const cleanDecisions = (data.decisions || [])
+      .map((item) => String(item || '').trim().slice(0, 500))
+      .filter(Boolean)
+      .slice(0, 30);
+    const cleanTasks: MeetingTask[] = (data.tasks || [])
+      .map((item) => ({
+        task: String(item?.task || '').trim().slice(0, 500),
+        assignedTo: String(item?.assignedTo || 'Team').trim().slice(0, 120) || 'Team',
+        deadline: String(item?.deadline || 'TBD').trim().slice(0, 80) || 'TBD',
+        completed: Boolean(item?.completed),
+      }))
+      .filter((t) => t.task.length > 0)
+      .slice(0, 30);
+    const cleanActionItems = (
+      data.actionItems && data.actionItems.length > 0
+        ? data.actionItems
+        : cleanTasks.map((t) => `${t.task} — Assigned to: ${t.assignedTo} (Deadline: ${t.deadline})`)
+    )
+      .map((item) => String(item || '').trim().slice(0, 500))
+      .filter(Boolean)
+      .slice(0, 30);
+    const cleanSummary = (data.aiSummary || '').slice(0, 5000);
+    const cleanMomText = (data.momText || '').slice(0, 20000);
+    const cleanTranscript = (data.transcriptText || '').slice(0, 60000);
 
     const createFreshTranscriptDoc = async () => {
       const freshId = `meet-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
@@ -1139,13 +1208,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         organizerId: firebaseUser.uid,
         organizerName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
         status: 'completed',
-        scheduledTime: new Date().toLocaleDateString(),
-        isPublic: true,
-        participantIds: [firebaseUser.uid],
-        transcriptText: data.transcriptText.slice(0, 60000),
-        aiSummary: data.aiSummary.slice(0, 5000),
-        decisions: data.decisions.slice(0, 30),
-        actionItems: data.actionItems.slice(0, 30),
+        scheduledTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        isPublic: resolvedIsPublic,
+        participantIds: resolvedParticipants,
+        transcriptText: cleanTranscript,
+        aiSummary: cleanSummary,
+        discussionPoints: cleanDiscussionPoints,
+        decisions: cleanDecisions,
+        actionItems: cleanActionItems,
+        tasks: cleanTasks,
+        momText: cleanMomText,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
@@ -1156,7 +1228,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (data.meetingId) {
         const snap = await getDoc(doc(db, 'meetings', data.meetingId));
         if (snap.exists() && snap.data()?.status === 'completed') {
-          if (snap.data()?.transcriptText && snap.data()?.aiSummary) {
+          if (snap.data()?.aiSummary && snap.data()?.momText) {
+            setLastTranscribedMeetingId(data.meetingId);
+            return data.meetingId;
+          }
+          if (snap.data()?.transcriptText && !snap.data()?.aiSummary) {
+            await updateDoc(doc(db, 'meetings', data.meetingId), {
+              aiSummary: cleanSummary,
+              discussionPoints: cleanDiscussionPoints,
+              decisions: cleanDecisions,
+              actionItems: cleanActionItems,
+              tasks: cleanTasks,
+              momText: cleanMomText,
+              updatedAt: serverTimestamp(),
+            });
             setLastTranscribedMeetingId(data.meetingId);
             return data.meetingId;
           }
@@ -1167,10 +1252,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         await updateDoc(doc(db, 'meetings', targetMeetingId), {
           status: 'completed',
-          transcriptText: data.transcriptText.slice(0, 60000),
-          aiSummary: data.aiSummary.slice(0, 5000),
-          decisions: data.decisions.slice(0, 30),
-          actionItems: data.actionItems.slice(0, 30),
+          transcriptText: cleanTranscript,
+          aiSummary: cleanSummary,
+          discussionPoints: cleanDiscussionPoints,
+          decisions: cleanDecisions,
+          actionItems: cleanActionItems,
+          tasks: cleanTasks,
+          momText: cleanMomText,
           updatedAt: serverTimestamp(),
         });
       } else {
@@ -1179,13 +1267,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           organizerId: firebaseUser.uid,
           organizerName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
           status: 'completed',
-          scheduledTime: new Date().toLocaleDateString(),
-          isPublic: true,
-          participantIds: [firebaseUser.uid],
-          transcriptText: data.transcriptText.slice(0, 60000),
-          aiSummary: data.aiSummary.slice(0, 5000),
-          decisions: data.decisions.slice(0, 30),
-          actionItems: data.actionItems.slice(0, 30),
+          scheduledTime: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+          isPublic: resolvedIsPublic,
+          participantIds: resolvedParticipants,
+          transcriptText: cleanTranscript,
+          aiSummary: cleanSummary,
+          discussionPoints: cleanDiscussionPoints,
+          decisions: cleanDecisions,
+          actionItems: cleanActionItems,
+          tasks: cleanTasks,
+          momText: cleanMomText,
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
@@ -1194,6 +1285,97 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return targetMeetingId;
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
+    }
+  };
+
+  const toggleMeetingTask = async (meetingId: string, taskIndex: number) => {
+    if (!firebaseUser) return;
+    const meeting = meetings.find((m) => m.id === meetingId);
+    if (!meeting || !meeting.tasks || !meeting.tasks[taskIndex]) return;
+
+    const updatedTasks = meeting.tasks.map((t, idx) =>
+      idx === taskIndex
+        ? {
+            task: String(t.task || '').slice(0, 500),
+            assignedTo: String(t.assignedTo || 'Team').slice(0, 120),
+            deadline: String(t.deadline || 'TBD').slice(0, 80),
+            completed: !t.completed,
+          }
+        : {
+            task: String(t.task || '').slice(0, 500),
+            assignedTo: String(t.assignedTo || 'Team').slice(0, 120),
+            deadline: String(t.deadline || 'TBD').slice(0, 80),
+            completed: Boolean(t.completed),
+          }
+    );
+
+    const path = `meetings/${meetingId}`;
+    try {
+      await updateDoc(doc(db, 'meetings', meetingId), {
+        tasks: updatedTasks,
+        updatedAt: serverTimestamp(),
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.UPDATE, path);
+    }
+  };
+
+  const postMomToChat = async (
+    meeting: MeetingRecord,
+    conversationId?: string
+  ): Promise<boolean> => {
+    if (!firebaseUser) return false;
+    const targetConv =
+      (conversationId && conversations.find((c) => c.id === conversationId)) ||
+      conversations.find((c) => c.id === 'general') ||
+      conversations[0];
+    if (!targetConv) return false;
+
+    const text = formatMoMForChat(meeting).trim().slice(0, 5000);
+    if (!text) return false;
+
+    const msgId = `msg-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    const path = `conversations/${targetConv.id}/messages/${msgId}`;
+
+    let ciphertext = '';
+    let iv = '';
+    try {
+      const encrypted = await encryptE2EEMessage(text, `conv-${targetConv.id}`);
+      ciphertext = encrypted.ciphertext.slice(0, 10000);
+      iv = encrypted.iv.slice(0, 128);
+    } catch {
+      // Fallback if WebCrypto unavailable
+    }
+
+    try {
+      await setDoc(doc(db, 'conversations', targetConv.id, 'messages', msgId), {
+        conversationId: targetConv.id,
+        senderId: firebaseUser.uid,
+        senderName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
+        senderAvatar: (currentProfile?.avatar || firebaseUser.photoURL || '').slice(0, 65000),
+        content: text,
+        ciphertext,
+        iv,
+        attachmentName: '',
+        attachmentType: 'none',
+        attachmentSize: 0,
+        attachmentData: '',
+        isPublic: targetConv.isPublic,
+        participantIds: targetConv.participantIds,
+        createdAt: serverTimestamp(),
+      });
+
+      await updateDoc(doc(db, 'conversations', targetConv.id), {
+        lastMessageText: `MoM: ${meeting.title}`.slice(0, 500),
+        lastMessageSender: (currentProfile?.displayName || 'AI Meeting Assistant').slice(0, 80),
+        updatedAt: serverTimestamp(),
+      });
+
+      setActiveConversationId(targetConv.id);
+      sounds.playMessageNotification();
+      return true;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, path);
     }
   };
 
@@ -1235,6 +1417,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         messages,
         meetings,
         activeMeeting,
+        activeCallMode,
         incomingCall,
         activeTab,
         errorBanner,
@@ -1242,6 +1425,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         lastTranscribedMeetingId,
 
         setActiveTab,
+        setActiveCallMode,
         setActiveConversationId,
         setErrorBanner,
         setLastTranscribedMeetingId,
@@ -1265,6 +1449,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         addCallParticipants,
         endVideoCall,
         saveMeetingTranscript,
+        toggleMeetingTask,
+        postMomToChat,
         deleteMeetingRecord,
         inviteTeamMember,
         removeTeamInvite,

@@ -266,6 +266,10 @@
           "type": "string",
           "maxLength": 5000
         },
+        "discussionPoints": {
+          "type": "array",
+          "description": "Important discussion points identified by the AI Meeting Assistant (max 30)."
+        },
         "decisions": {
           "type": "array",
           "description": "List of meeting decisions (max 30)."
@@ -273,6 +277,14 @@
         "actionItems": {
           "type": "array",
           "description": "List of action item strings (max 30)."
+        },
+        "tasks": {
+          "type": "array",
+          "description": "Structured action items with task, assignedTo, deadline, and completed (max 30)."
+        },
+        "momText": {
+          "type": "string",
+          "maxLength": 20000
         },
         "createdAt": {
           "type": "string",

@@ -137,7 +137,8 @@ service cloud.firestore {
         data.keys().hasOnly([
           'title', 'organizerId', 'organizerName', 'status', 'scheduledTime',
           'isPublic', 'participantIds', 'transcriptText', 'aiSummary',
-          'decisions', 'actionItems', 'createdAt', 'updatedAt'
+          'discussionPoints', 'decisions', 'actionItems', 'tasks', 'momText',
+          'createdAt', 'updatedAt'
         ]) &&
         data.title is string && data.title.size() >= 1 && data.title.size() <= 150 &&
         data.organizerId is string && isValidId(data.organizerId) &&
@@ -149,8 +150,23 @@ service cloud.firestore {
         data.participantIds[0] is string && data.participantIds[0].size() <= 128 &&
         (!('transcriptText' in data) || (data.transcriptText is string && data.transcriptText.size() <= 60000)) &&
         (!('aiSummary' in data) || (data.aiSummary is string && data.aiSummary.size() <= 5000)) &&
-        (!('decisions' in data) || (data.decisions is list && data.decisions.size() <= 30 && (data.decisions.size() == 0 || data.decisions[0] is string))) &&
-        (!('actionItems' in data) || (data.actionItems is list && data.actionItems.size() <= 30 && (data.actionItems.size() == 0 || data.actionItems[0] is string))) &&
+        (!('discussionPoints' in data) || (data.discussionPoints is list && data.discussionPoints.size() <= 30 && (data.discussionPoints.size() == 0 || (data.discussionPoints[0] is string && data.discussionPoints[0].size() <= 500)))) &&
+        (!('decisions' in data) || (data.decisions is list && data.decisions.size() <= 30 && (data.decisions.size() == 0 || (data.decisions[0] is string && data.decisions[0].size() <= 500)))) &&
+        (!('actionItems' in data) || (data.actionItems is list && data.actionItems.size() <= 30 && (data.actionItems.size() == 0 || (data.actionItems[0] is string && data.actionItems[0].size() <= 500)))) &&
+        (!('tasks' in data) || (
+          data.tasks is list &&
+          data.tasks.size() <= 30 &&
+          (data.tasks.size() == 0 || (
+            data.tasks[0] is map &&
+            data.tasks[0].keys().hasAll(['task', 'assignedTo', 'deadline', 'completed']) &&
+            data.tasks[0].keys().hasOnly(['task', 'assignedTo', 'deadline', 'completed']) &&
+            data.tasks[0].task is string && data.tasks[0].task.size() <= 500 &&
+            data.tasks[0].assignedTo is string && data.tasks[0].assignedTo.size() <= 120 &&
+            data.tasks[0].deadline is string && data.tasks[0].deadline.size() <= 80 &&
+            data.tasks[0].completed is bool
+          ))
+        )) &&
+        (!('momText' in data) || (data.momText is string && data.momText.size() <= 20000)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -391,7 +407,15 @@ service cloud.firestore {
             existing().status != 'completed' &&
             (existing().isPublic == true || request.auth.uid in existing().participantIds || existing().organizerId == request.auth.uid) &&
             incoming().diff(existing()).affectedKeys().hasOnly([
-              'status', 'participantIds', 'transcriptText', 'aiSummary', 'decisions', 'actionItems', 'updatedAt'
+              'status', 'participantIds', 'transcriptText', 'aiSummary',
+              'discussionPoints', 'decisions', 'actionItems', 'tasks', 'momText', 'updatedAt'
+            ])
+          ) || (
+            existing().status == 'completed' &&
+            incoming().status == 'completed' &&
+            (existing().isPublic == true || request.auth.uid in existing().participantIds || existing().organizerId == request.auth.uid) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'aiSummary', 'discussionPoints', 'decisions', 'actionItems', 'tasks', 'momText', 'updatedAt'
             ])
           )
         );

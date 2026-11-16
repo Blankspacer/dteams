@@ -45,21 +45,40 @@ export function useWebRTCCall(params: {
 
   useEffect(() => {
     localStreamRef.current = localStream;
-    // Attach new tracks to any already-open peer connections
+    // Attach or replace tracks on any already-open peer connections
     if (localStream) {
-      peersRef.current.forEach((pc) => {
+      peersRef.current.forEach(async (pc, peerUid) => {
         const senders = pc.getSenders();
+        let addedNewTrack = false;
         localStream.getTracks().forEach((track) => {
           const existingSender = senders.find((s) => s.track?.kind === track.kind);
           if (existingSender) {
             existingSender.replaceTrack(track).catch(() => {});
           } else {
             pc.addTrack(track, localStream);
+            addedNewTrack = true;
           }
         });
+        if (addedNewTrack && pc.signalingState === 'stable' && pc.remoteDescription && meetingId && myUid) {
+          try {
+            const offer = await pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+            await pc.setLocalDescription(offer);
+            const sigId = `${myUid.slice(0, 12)}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            await setDoc(doc(db, 'meetings', meetingId, 'signals', sigId), {
+              meetingId,
+              fromUid: myUid,
+              toUid: peerUid,
+              type: 'offer',
+              payload: JSON.stringify({ sdp: offer.sdp, type: offer.type }).slice(0, 15000),
+              createdAt: serverTimestamp(),
+            });
+          } catch {
+            // Ignore transient renegotiation race
+          }
+        }
       });
     }
-  }, [localStream]);
+  }, [localStream, meetingId, myUid]);
 
   useEffect(() => {
     if (!meetingId || !myUid) {
@@ -200,7 +219,7 @@ export function useWebRTCCall(params: {
             }
           } else if (data.type === 'offer') {
             const existing = peersRef.current.get(data.fromUid);
-            if (existing) {
+            if (existing && (existing.connectionState === 'failed' || existing.connectionState === 'closed' || existing.signalingState !== 'stable')) {
               existing.close();
               peersRef.current.delete(data.fromUid);
             }

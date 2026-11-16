@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   Send,
   Paperclip,
+  Phone,
   Video,
   Lock,
   Plus,
@@ -579,20 +580,38 @@ export const SimpleChatView: React.FC = () => {
                           </div>
                         </div>
                       </button>
-                      <button
-                        type="button"
-                        onClick={() =>
-                          startVideoCall(`Call with ${member.displayName}`, [
-                            firebaseUser!.uid,
-                            member.uid,
-                          ])
-                        }
-                        className="min-h-[36px] min-w-[36px] rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 flex items-center justify-center shrink-0"
-                        title={`Call ${member.displayName}`}
-                        aria-label={`Call ${member.displayName}`}
-                      >
-                        <Video className="w-4 h-4" />
-                      </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            startVideoCall(
+                              `Voice Call with ${member.displayName}`,
+                              [firebaseUser!.uid, member.uid],
+                              'voice'
+                            )
+                          }
+                          className="min-h-[34px] min-w-[34px] rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0"
+                          title={`Voice call ${member.displayName}`}
+                          aria-label={`Voice call ${member.displayName}`}
+                        >
+                          <Phone className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            startVideoCall(
+                              `Call with ${member.displayName}`,
+                              [firebaseUser!.uid, member.uid],
+                              'video'
+                            )
+                          }
+                          className="min-h-[34px] min-w-[34px] rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 flex items-center justify-center shrink-0"
+                          title={`Video call ${member.displayName}`}
+                          aria-label={`Video call ${member.displayName}`}
+                        >
+                          <Video className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
                   );
                 })}
@@ -821,18 +840,39 @@ export const SimpleChatView: React.FC = () => {
                 )}
 
                 <button
+                  type="button"
+                  onClick={() =>
+                    startVideoCall(
+                      `Voice Call: ${getConversationTitle(activeConv)}`,
+                      activeConv.isPublic
+                        ? teamUsers.slice(0, 50).map((u) => u.uid)
+                        : activeConv.participantIds,
+                      'voice'
+                    )
+                  }
+                  className="min-h-[40px] px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0"
+                  title="Start Voice Call"
+                >
+                  <Phone className="w-4 h-4" />
+                  <span className="hidden sm:inline">Voice</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={() =>
                     startVideoCall(
                       `Call: ${getConversationTitle(activeConv)}`,
                       activeConv.isPublic
                         ? teamUsers.slice(0, 50).map((u) => u.uid)
-                        : activeConv.participantIds
+                        : activeConv.participantIds,
+                      'video'
                     )
                   }
-                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0"
+                  className="min-h-[40px] px-3 sm:px-3.5 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0"
+                  title="Start Video Call"
                 >
                   <Video className="w-4 h-4" />
-                  <span>Call</span>
+                  <span className="hidden sm:inline">Video</span>
                 </button>
               </div>
             </div>

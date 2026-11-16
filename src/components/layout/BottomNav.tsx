@@ -1,5 +1,5 @@
 import React from 'react';
-import { MessageSquare, Video, FileText, User } from 'lucide-react';
+import { MessageSquare, Phone, Sparkles, User } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AppTab } from '../../types';
 
@@ -8,8 +8,8 @@ export const BottomNav: React.FC = () => {
 
   const tabs: Array<{ id: AppTab; label: string; icon: React.ReactNode }> = [
     { id: 'chat', label: 'Chat', icon: <MessageSquare className="w-5 h-5" /> },
-    { id: 'video', label: 'Video Call', icon: <Video className="w-5 h-5" /> },
-    { id: 'transcripts', label: 'Transcripts', icon: <FileText className="w-5 h-5" /> },
+    { id: 'video', label: 'Calls', icon: <Phone className="w-5 h-5" /> },
+    { id: 'transcripts', label: 'AI Assistant', icon: <Sparkles className="w-5 h-5" /> },
     { id: 'account', label: 'Account', icon: <User className="w-5 h-5" /> },
   ];
 

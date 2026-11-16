@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { PhoneIncoming, PhoneOff, Video, Bell } from 'lucide-react';
+import { Phone, PhoneIncoming, PhoneOff, Video, Bell } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { sounds } from '../../utils/audio';
 
@@ -85,6 +85,7 @@ export const IncomingCallOverlay: React.FC = () => {
 
   if (!incomingCall) return null;
 
+  const isVoiceCall = incomingCall.title.toLowerCase().includes('voice');
   const caller = teamUsers.find((u) => u.uid === incomingCall.organizerId);
   const callerName = caller?.displayName || incomingCall.organizerName || 'Teammate';
   const initials = callerName.slice(0, 2).toUpperCase();
@@ -123,8 +124,8 @@ export const IncomingCallOverlay: React.FC = () => {
 
           <div className="space-y-1">
             <div className="inline-flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-emerald-400">
-              <Video className="w-3.5 h-3.5" />
-              <span>Incoming Call · Ringing</span>
+              {isVoiceCall ? <Phone className="w-3.5 h-3.5" /> : <Video className="w-3.5 h-3.5" />}
+              <span>{isVoiceCall ? 'Incoming Voice Call · Ringing' : 'Incoming Video Call · Ringing'}</span>
             </div>
             <h2 className="text-xl font-bold text-white">{callerName}</h2>
             <p className="text-xs text-slate-300 truncate max-w-xs">{incomingCall.title}</p>
@@ -148,7 +149,7 @@ export const IncomingCallOverlay: React.FC = () => {
             onClick={async () => {
               setAnswering(true);
               try {
-                await answerIncomingCall(incomingCall);
+                await answerIncomingCall(incomingCall, isVoiceCall ? 'voice' : 'video');
               } finally {
                 setAnswering(false);
               }
@@ -156,7 +157,7 @@ export const IncomingCallOverlay: React.FC = () => {
             className="min-h-[52px] px-4 rounded-2xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-60"
           >
             <PhoneIncoming className="w-5 h-5" />
-            <span>{answering ? 'Joining...' : 'Answer'}</span>
+            <span>{answering ? 'Joining...' : isVoiceCall ? 'Answer Voice' : 'Answer'}</span>
           </button>
         </div>
 

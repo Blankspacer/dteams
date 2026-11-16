@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, ChevronDown, LogOut, User, Video } from 'lucide-react';
+import { Camera, ChevronDown, LogOut, Phone, User, Video } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AppTab, UserStatus } from '../../types';
 import { PWAInstallButton } from '../common/PWAInstallButton';
@@ -37,8 +37,8 @@ export const TopNav: React.FC = () => {
 
   const navItems: Array<{ id: AppTab; label: string }> = [
     { id: 'chat', label: 'Chat' },
-    { id: 'video', label: 'Video Call' },
-    { id: 'transcripts', label: 'Transcripts' },
+    { id: 'video', label: 'Calls' },
+    { id: 'transcripts', label: 'AI Assistant' },
     { id: 'account', label: 'Account' },
   ];
 
@@ -119,19 +119,33 @@ export const TopNav: React.FC = () => {
       <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
         <PWAInstallButton variant="compact" />
 
+        {!activeMeeting && (
+          <button
+            type="button"
+            onClick={() => startVideoCall(undefined, undefined, 'voice')}
+            className="px-2.5 sm:px-3 py-2 min-h-[40px] rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+            title="Start Voice Call"
+            aria-label="Start Voice Call"
+          >
+            <Phone className="w-4 h-4 shrink-0" />
+            <span className="hidden sm:inline">Voice</span>
+          </button>
+        )}
+
         <button
           onClick={() => {
             if (activeMeeting) {
               setActiveTab('video');
             } else {
-              startVideoCall();
+              startVideoCall(undefined, undefined, 'video');
             }
           }}
           className="px-2.5 sm:px-3.5 py-2 min-h-[40px] rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+          title={activeMeeting ? 'Return to active call' : 'Start Video Call'}
         >
           <Video className="w-4 h-4 shrink-0" />
-          <span className="hidden sm:inline">{activeMeeting ? 'Return to Call' : 'Start Call'}</span>
-          <span className="sm:hidden">Call</span>
+          <span className="hidden sm:inline">{activeMeeting ? 'Return to Call' : 'Video Call'}</span>
+          <span className="sm:hidden">{activeMeeting ? 'Call' : 'Video'}</span>
         </button>
 
         {/* User Avatar + Status Menu */}

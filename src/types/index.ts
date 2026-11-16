@@ -48,6 +48,13 @@ export interface ChatMessage {
   createdAt?: unknown;
 }
 
+export interface MeetingTask {
+  task: string;
+  assignedTo: string;
+  deadline: string;
+  completed: boolean;
+}
+
 export interface MeetingRecord {
   id: string;
   title: string;
@@ -59,8 +66,11 @@ export interface MeetingRecord {
   participantIds: string[];
   transcriptText?: string;
   aiSummary?: string;
+  discussionPoints?: string[];
   decisions?: string[];
   actionItems?: string[];
+  tasks?: MeetingTask[];
+  momText?: string;
   createdAt?: unknown;
   updatedAt?: unknown;
 }
