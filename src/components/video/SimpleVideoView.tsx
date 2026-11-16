@@ -13,6 +13,7 @@ import {
   UserPlus,
   Check,
   X,
+  Sparkles,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AddMemberModal } from '../common/AddMemberModal';
@@ -21,10 +22,36 @@ import { sounds } from '../../utils/audio';
 import { useWebRTCCall } from '../../hooks/useWebRTCCall';
 import { getEffectiveUserStatus, sortUsersByPresence } from '../../utils/presence';
 
+const AUTO_TRANSCRIBE_STORAGE_KEY = 'spherecall_auto_transcribe';
+
+function pickSupportedAudioMimeType(): string {
+  if (typeof MediaRecorder === 'undefined') return '';
+  const candidates = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/ogg;codecs=opus',
+  ];
+  for (const type of candidates) {
+    if (MediaRecorder.isTypeSupported?.(type)) return type;
+  }
+  return '';
+}
+
+function readBlobAsDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onerror = () => reject(new Error('Failed to read call audio recording.'));
+    reader.onload = () => resolve(reader.result as string);
+    reader.readAsDataURL(blob);
+  });
+}
+
 const RemoteParticipantTile: React.FC<{
   displayName: string;
+  avatar?: string;
   stream?: MediaStream;
-}> = ({ displayName, stream }) => {
+}> = ({ displayName, avatar, stream }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [hasVideo, setHasVideo] = useState(false);
 
@@ -61,9 +88,18 @@ const RemoteParticipantTile: React.FC<{
       )}
       {!hasVideo && (
         <div className="flex flex-col items-center gap-2">
-          <div className="w-16 h-16 rounded-full bg-slate-700 flex items-center justify-center text-xl font-bold">
-            {displayName.slice(0, 2).toUpperCase()}
-          </div>
+          {avatar ? (
+            <img
+              src={avatar}
+              alt={displayName}
+              referrerPolicy="no-referrer"
+              className="w-16 h-16 rounded-full object-cover border-2 border-slate-600"
+            />
+          ) : (
+            <div className="w-16 h-16 rounded-full bg-slate-700 flex items-center justify-center text-xl font-bold">
+              {displayName.slice(0, 2).toUpperCase()}
+            </div>
+          )}
           <span className="text-sm font-semibold">{displayName}</span>
           <span className="text-[11px] text-slate-400">
             {stream ? 'Connected (Audio)' : 'Ringing...'}
@@ -93,6 +129,7 @@ export const SimpleVideoView: React.FC = () => {
     endVideoCall,
     saveMeetingTranscript,
     setActiveTab,
+    setErrorBanner,
     presenceNow,
   } = useApp();
 
@@ -106,6 +143,13 @@ export const SimpleVideoView: React.FC = () => {
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [autoTranscribeEnabled, setAutoTranscribeEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(AUTO_TRANSCRIBE_STORAGE_KEY) !== 'false';
+    } catch {
+      return true;
+    }
+  });
   const [isRecording, setIsRecording] = useState(false);
   const [showCaptions, setShowCaptions] = useState(true);
   const [callSeconds, setCallSeconds] = useState(0);
@@ -119,10 +163,23 @@ export const SimpleVideoView: React.FC = () => {
   const localStreamRef = useRef<MediaStream | null>(null);
   const screenStreamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
+  const recorderMimeRef = useRef<string>('audio/webm');
   const audioChunksRef = useRef<Blob[]>([]);
   const speechRecRef = useRef<any>(null);
+  const keepSpeechRunningRef = useRef<boolean>(false);
+  const audioCtxRef = useRef<AudioContext | null>(null);
+  const mixerDestRef = useRef<MediaStreamAudioDestinationNode | null>(null);
+  const connectedTrackIdsRef = useRef<Set<string>>(new Set());
+  const liveTranscriptRef = useRef<string>('');
+  const endingLocallyRef = useRef<boolean>(false);
+  const activeCallMetaRef = useRef<{
+    id: string;
+    title: string;
+    participantNames: string[];
+  } | null>(null);
 
   const liveCalls = meetings.filter((m) => m.status === 'live');
+  const canRecord = currentProfile?.canRecordMeetings !== false;
 
   const { remoteStreams } = useWebRTCCall({
     meetingId: activeMeeting?.id || null,
@@ -130,6 +187,35 @@ export const SimpleVideoView: React.FC = () => {
     participantIds: activeMeeting?.participantIds || [],
     localStream,
   });
+
+  useEffect(() => {
+    liveTranscriptRef.current = liveTranscript;
+  }, [liveTranscript]);
+
+  useEffect(() => {
+    if (!activeMeeting) {
+      activeCallMetaRef.current = null;
+      return;
+    }
+    const participantNames = activeMeeting.participantIds
+      .map((uid) => teamUsers.find((u) => u.uid === uid)?.displayName)
+      .filter((n): n is string => Boolean(n));
+    activeCallMetaRef.current = {
+      id: activeMeeting.id,
+      title: activeMeeting.title,
+      participantNames,
+    };
+  }, [activeMeeting?.id, activeMeeting?.title, activeMeeting?.participantIds.length, teamUsers]);
+
+  const toggleAutoTranscribePreference = () => {
+    const next = !autoTranscribeEnabled;
+    setAutoTranscribeEnabled(next);
+    try {
+      localStorage.setItem(AUTO_TRANSCRIBE_STORAGE_KEY, String(next));
+    } catch {
+      // Ignore storage errors
+    }
+  };
 
   // Call timer
   useEffect(() => {
@@ -164,10 +250,261 @@ export const SimpleVideoView: React.FC = () => {
     callSeconds > 30,
   ]);
 
-  // Acquire camera + mic when joining/starting a call
+  const connectStreamAudioToMixer = (stream: MediaStream | null) => {
+    const ctx = audioCtxRef.current;
+    const dest = mixerDestRef.current;
+    if (!ctx || !dest || !stream) return;
+
+    const audioTracks = stream.getAudioTracks();
+    const newTracks = audioTracks.filter((t) => !connectedTrackIdsRef.current.has(t.id));
+    if (newTracks.length === 0) return;
+
+    try {
+      const subStream = new MediaStream(newTracks);
+      const source = ctx.createMediaStreamSource(subStream);
+      source.connect(dest);
+      newTracks.forEach((t) => connectedTrackIdsRef.current.add(t.id));
+    } catch {
+      // Ignore streams that cannot be attached
+    }
+  };
+
+  const stopRecordingCapture = async (): Promise<Blob | null> => {
+    keepSpeechRunningRef.current = false;
+    try {
+      speechRecRef.current?.stop();
+    } catch {
+      // Ignore
+    }
+    speechRecRef.current = null;
+
+    const recorder = recorderRef.current;
+    if (recorder && recorder.state !== 'inactive') {
+      await new Promise<void>((resolve) => {
+        const timeout = setTimeout(resolve, 1500);
+        const prevOnStop = recorder.onstop;
+        recorder.onstop = (ev) => {
+          clearTimeout(timeout);
+          if (typeof prevOnStop === 'function') {
+            prevOnStop.call(recorder, ev);
+          }
+          resolve();
+        };
+        try {
+          recorder.stop();
+        } catch {
+          clearTimeout(timeout);
+          resolve();
+        }
+      });
+    }
+    recorderRef.current = null;
+    setIsRecording(false);
+
+    if (audioCtxRef.current) {
+      audioCtxRef.current.close().catch(() => {});
+      audioCtxRef.current = null;
+      mixerDestRef.current = null;
+      connectedTrackIdsRef.current.clear();
+    }
+
+    if (audioChunksRef.current.length === 0) return null;
+    const blob = new Blob(audioChunksRef.current, {
+      type: recorderMimeRef.current || 'audio/webm',
+    });
+    return blob.size > 512 ? blob : null;
+  };
+
+  const startRecordingCapture = () => {
+    if (!canRecord || isRecording) return;
+
+    audioChunksRef.current = [];
+    setIsRecording(true);
+
+    // 1. Mix local + remote audio tracks via Web Audio API so BOTH sides of any call are transcribed
+    if (typeof MediaRecorder !== 'undefined') {
+      try {
+        const AudioCtx =
+          window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+        if (AudioCtx) {
+          const ctx = new AudioCtx();
+          if (ctx.state === 'suspended') {
+            ctx.resume().catch(() => {});
+          }
+          const dest = ctx.createMediaStreamDestination();
+          audioCtxRef.current = ctx;
+          mixerDestRef.current = dest;
+          connectedTrackIdsRef.current.clear();
+
+          connectStreamAudioToMixer(localStreamRef.current);
+          Object.values(remoteStreams).forEach((remote) => connectStreamAudioToMixer(remote));
+
+          const mime = pickSupportedAudioMimeType();
+          recorderMimeRef.current = mime || 'audio/webm';
+          const recorder = mime
+            ? new MediaRecorder(dest.stream, { mimeType: mime })
+            : new MediaRecorder(dest.stream);
+
+          recorder.ondataavailable = (e) => {
+            if (e.data && e.data.size > 0) {
+              audioChunksRef.current.push(e.data);
+            }
+          };
+          recorder.start(1000);
+          recorderRef.current = recorder;
+        }
+      } catch {
+        // Fallback: record local stream directly if Web Audio mixer unavailable
+        if (localStreamRef.current) {
+          const audioOnly = new MediaStream(localStreamRef.current.getAudioTracks());
+          if (audioOnly.getAudioTracks().length > 0) {
+            try {
+              const mime = pickSupportedAudioMimeType();
+              recorderMimeRef.current = mime || 'audio/webm';
+              const recorder = mime
+                ? new MediaRecorder(audioOnly, { mimeType: mime })
+                : new MediaRecorder(audioOnly);
+              recorder.ondataavailable = (e) => {
+                if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+              };
+              recorder.start(1000);
+              recorderRef.current = recorder;
+            } catch {
+              // SpeechRecognition fallback continues below
+            }
+          }
+        }
+      }
+    }
+
+    // 2. Live continuous browser SpeechRecognition captions (auto-restarts during call)
+    const SpeechRec =
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (SpeechRec) {
+      keepSpeechRunningRef.current = true;
+      const startSpeech = () => {
+        if (!keepSpeechRunningRef.current) return;
+        try {
+          const rec = new SpeechRec();
+          rec.continuous = true;
+          rec.interimResults = true;
+          rec.lang = 'en-US';
+          rec.onresult = (event: any) => {
+            let finalText = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+              if (event.results[i].isFinal) {
+                finalText += event.results[i][0].transcript + ' ';
+              }
+            }
+            if (finalText.trim()) {
+              const speaker = currentProfile?.displayName || 'Speaker';
+              setLiveTranscript((prev) =>
+                `${prev}${prev ? '\n' : ''}${speaker}: ${finalText.trim()}`
+              );
+            }
+          };
+          rec.onend = () => {
+            if (keepSpeechRunningRef.current) {
+              setTimeout(startSpeech, 400);
+            }
+          };
+          rec.onerror = () => {
+            // Stop retry loop on fatal permission errors
+          };
+          rec.start();
+          speechRecRef.current = rec;
+        } catch {
+          // Ignore if SpeechRecognition unavailable
+        }
+      };
+      startSpeech();
+    }
+  };
+
+  const transcribeAndSaveCall = async (params: {
+    meetingId: string;
+    meetingTitle: string;
+    participantNames: string[];
+    audioBlob: Blob | null;
+    liveNotes: string;
+  }) => {
+    const { meetingId, meetingTitle, participantNames, audioBlob, liveNotes } = params;
+    const trimmedNotes = liveNotes.trim();
+    if (!audioBlob && !trimmedNotes) return false;
+
+    if (audioBlob) {
+      const base64 = await readBlobAsDataUrl(audioBlob);
+      const resp = await fetch('/api/ai/transcribe-meeting', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          audioBase64: base64,
+          mimeType: audioBlob.type || 'audio/webm',
+          meetingTitle,
+          participantNames,
+          liveNotes: trimmedNotes,
+        }),
+      });
+
+      if (resp.ok) {
+        const data = await resp.json();
+        await saveMeetingTranscript({
+          meetingId,
+          title: meetingTitle,
+          transcriptText: data.transcriptText || trimmedNotes,
+          aiSummary: data.summary || '',
+          decisions: data.decisions || [],
+          actionItems: data.actionItems || [],
+        });
+        return true;
+      }
+      const errData = await resp.json().catch(() => ({}));
+      if (!trimmedNotes) {
+        throw new Error(errData?.error || 'AI transcription failed.');
+      }
+    }
+
+    if (trimmedNotes) {
+      const resp = await fetch('/api/ai/meeting-minutes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          meetingTitle,
+          transcriptText: trimmedNotes,
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        await saveMeetingTranscript({
+          meetingId,
+          title: meetingTitle,
+          transcriptText: trimmedNotes,
+          aiSummary: data.summary || '',
+          decisions: data.decisions || [],
+          actionItems: data.actionItems || [],
+        });
+        return true;
+      }
+    }
+
+    return false;
+  };
+
+  // Wire any newly connected remote caller audio tracks into the call mixer dynamically
+  useEffect(() => {
+    if (!isRecording) return;
+    Object.values(remoteStreams).forEach((remote) => {
+      connectStreamAudioToMixer(remote);
+    });
+  }, [remoteStreams, isRecording]);
+
+  // Acquire camera + mic when joining/starting a call, and auto-start AI call transcription
   useEffect(() => {
     if (!activeMeeting) return;
     let cancelled = false;
+    endingLocallyRef.current = false;
+    setLiveTranscript('');
+    audioChunksRef.current = [];
 
     async function initMedia() {
       setMediaError(null);
@@ -186,6 +523,9 @@ export const SimpleVideoView: React.FC = () => {
           if (localVideoRef.current) {
             localVideoRef.current.srcObject = stream;
           }
+          if (autoTranscribeEnabled && canRecord) {
+            startRecordingCapture();
+          }
         }
       } catch {
         setMediaError('Camera or microphone permission unavailable. Audio/video preview is disabled.');
@@ -196,19 +536,33 @@ export const SimpleVideoView: React.FC = () => {
 
     return () => {
       cancelled = true;
+      const meta = activeCallMetaRef.current;
+      const capturedNotes = liveTranscriptRef.current;
+      const wasEndingLocally = endingLocallyRef.current;
+
+      stopRecordingCapture()
+        .then(async (audioBlob) => {
+          if (!wasEndingLocally && meta && (audioBlob || capturedNotes.trim())) {
+            try {
+              await transcribeAndSaveCall({
+                meetingId: meta.id,
+                meetingTitle: meta.title,
+                participantNames: meta.participantNames,
+                audioBlob,
+                liveNotes: capturedNotes,
+              });
+            } catch {
+              // Background auto-save when remote peer ended call
+            }
+          }
+        })
+        .catch(() => {});
+
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
       localStreamRef.current = null;
       setLocalStream(null);
       screenStreamRef.current?.getTracks().forEach((t) => t.stop());
       screenStreamRef.current = null;
-      try {
-        speechRecRef.current?.stop();
-      } catch {
-        // Ignore
-      }
-      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-        recorderRef.current.stop();
-      }
     };
   }, [activeMeeting?.id]);
 
@@ -262,159 +616,78 @@ export const SimpleVideoView: React.FC = () => {
     }
   };
 
-  const toggleRecordingAndTranscript = () => {
+  const toggleRecordingAndTranscript = async () => {
     if (isRecording) {
-      setIsRecording(false);
-      if (recorderRef.current && recorderRef.current.state !== 'inactive') {
-        recorderRef.current.stop();
-      }
+      keepSpeechRunningRef.current = false;
       try {
         speechRecRef.current?.stop();
       } catch {
         // Ignore
       }
+      if (recorderRef.current && recorderRef.current.state === 'recording') {
+        try {
+          recorderRef.current.pause();
+        } catch {
+          // Ignore if pause unsupported
+        }
+      }
+      setIsRecording(false);
       return;
     }
 
-    setIsRecording(true);
-    audioChunksRef.current = [];
-
-    // 1. Capture audio track for Gemini audio transcription
-    if (localStreamRef.current && typeof MediaRecorder !== 'undefined') {
-      const audioOnly = new MediaStream(localStreamRef.current.getAudioTracks());
-      if (audioOnly.getAudioTracks().length > 0) {
-        try {
-          const recorder = new MediaRecorder(audioOnly);
-          recorder.ondataavailable = (e) => {
-            if (e.data.size > 0) audioChunksRef.current.push(e.data);
-          };
-          recorder.start(1000);
-          recorderRef.current = recorder;
-        } catch {
-          // Fallback to speech recognition
-        }
-      }
-    }
-
-    // 2. Also capture live browser SpeechRecognition captions if supported
-    const SpeechRec =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (SpeechRec) {
+    if (recorderRef.current && recorderRef.current.state === 'paused') {
       try {
-        const rec = new SpeechRec();
-        rec.continuous = true;
-        rec.interimResults = true;
-        rec.lang = 'en-US';
-        rec.onresult = (event: any) => {
-          let finalText = '';
-          for (let i = event.resultIndex; i < event.results.length; i++) {
-            if (event.results[i].isFinal) {
-              finalText += event.results[i][0].transcript + ' ';
-            }
-          }
-          if (finalText.trim()) {
-            const speaker = currentProfile?.displayName || 'Speaker';
-            setLiveTranscript((prev) =>
-              `${prev}${prev ? '\n' : ''}${speaker}: ${finalText.trim()}`
-            );
-          }
-        };
-        rec.start();
-        speechRecRef.current = rec;
+        recorderRef.current.resume();
+        setIsRecording(true);
+        return;
       } catch {
-        // Ignore if SpeechRecognition unavailable
+        // Fall through to fresh capture
       }
     }
+    startRecordingCapture();
   };
 
   const handleEndCall = async () => {
-    if (!activeMeeting) return;
+    if (!activeMeeting || savingTranscript) return;
+    endingLocallyRef.current = true;
     const meetingId = activeMeeting.id;
     const meetingTitle = activeMeeting.title;
+    const participantNames = activeMeeting.participantIds
+      .map((uid) => teamUsers.find((u) => u.uid === uid)?.displayName)
+      .filter((n): n is string => Boolean(n));
 
-    if (isRecording && recorderRef.current && recorderRef.current.state !== 'inactive') {
-      recorderRef.current.stop();
-      await new Promise((r) => setTimeout(r, 300));
-    }
+    setSavingTranscript(true);
     try {
-      speechRecRef.current?.stop();
-    } catch {
-      // Ignore
-    }
+      const audioBlob = await stopRecordingCapture();
+      const notes = liveTranscriptRef.current;
 
-    const hadAudio = audioChunksRef.current.length > 0;
-    const hadText = liveTranscript.trim().length > 0;
-
-    if (hadAudio || hadText) {
-      setSavingTranscript(true);
-      try {
-        if (hadAudio) {
-          const blob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-          const base64: string = await new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onerror = () => reject(new Error('Read error'));
-            reader.onload = () => resolve(reader.result as string);
-            reader.readAsDataURL(blob);
+      if (audioBlob || notes.trim()) {
+        try {
+          const saved = await transcribeAndSaveCall({
+            meetingId,
+            meetingTitle,
+            participantNames,
+            audioBlob,
+            liveNotes: notes,
           });
-
-          const resp = await fetch('/api/ai/transcribe-meeting', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              audioBase64: base64,
-              mimeType: blob.type || 'audio/webm',
-              meetingTitle,
-            }),
-          });
-
-          if (resp.ok) {
-            const data = await resp.json();
-            await saveMeetingTranscript({
-              meetingId,
-              title: meetingTitle,
-              transcriptText: data.transcriptText || liveTranscript,
-              aiSummary: data.summary || '',
-              decisions: data.decisions || [],
-              actionItems: data.actionItems || [],
-            });
-          } else {
-            await endVideoCall(meetingId, liveTranscript);
+          if (!saved) {
+            await endVideoCall(meetingId, notes.trim() || undefined);
           }
-        } else if (hadText) {
-          const resp = await fetch('/api/ai/meeting-minutes', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              meetingTitle,
-              transcriptText: liveTranscript,
-            }),
-          });
-          if (resp.ok) {
-            const data = await resp.json();
-            await saveMeetingTranscript({
-              meetingId,
-              title: meetingTitle,
-              transcriptText: liveTranscript,
-              aiSummary: data.summary || '',
-              decisions: data.decisions || [],
-              actionItems: data.actionItems || [],
-            });
-          } else {
-            await endVideoCall(meetingId, liveTranscript);
-          }
+        } catch (err) {
+          setErrorBanner(
+            err instanceof Error ? err.message : 'Could not auto-transcribe call recording.'
+          );
+          await endVideoCall(meetingId, notes.trim() || undefined);
         }
-      } catch {
-        await endVideoCall(meetingId, liveTranscript);
-      } finally {
-        setSavingTranscript(false);
-        setIsRecording(false);
         setLiveTranscript('');
         setActiveTab('transcripts');
+        return;
       }
-      return;
-    }
 
-    await endVideoCall(meetingId);
+      await endVideoCall(meetingId);
+    } finally {
+      setSavingTranscript(false);
+    }
   };
 
   const formatTimer = (secs: number) => {
@@ -429,11 +702,29 @@ export const SimpleVideoView: React.FC = () => {
       <div className="flex-1 overflow-y-auto bg-slate-50 p-4 sm:p-8">
         <div className="max-w-3xl mx-auto space-y-6">
           <div className="bg-white border border-slate-200 rounded-2xl p-6 sm:p-8 space-y-5">
-            <div className="space-y-1.5">
-              <h1 className="text-xl sm:text-2xl font-bold text-slate-900">Video Call</h1>
-              <p className="text-sm text-slate-500">
-                Start an instant video call with your team. Turn on recording anytime to save an AI transcript automatically.
-              </p>
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+              <div className="space-y-1.5">
+                <h1 className="text-xl sm:text-2xl font-bold text-slate-900">Video Call</h1>
+                <p className="text-sm text-slate-500">
+                  Start an instant call with your team. AI automatically transcribes the conversation and generates minutes when the call ends.
+                </p>
+              </div>
+
+              {canRecord && (
+                <button
+                  type="button"
+                  onClick={toggleAutoTranscribePreference}
+                  className={`min-h-[38px] px-3.5 rounded-xl border text-xs font-semibold flex items-center gap-2 transition-colors shrink-0 ${
+                    autoTranscribeEnabled
+                      ? 'bg-sky-50 border-sky-200 text-sky-800'
+                      : 'bg-slate-50 border-slate-200 text-slate-600'
+                  }`}
+                  title="Automatically record and transcribe all calls with AI"
+                >
+                  <Sparkles className={`w-3.5 h-3.5 ${autoTranscribeEnabled ? 'text-sky-600' : 'text-slate-400'}`} />
+                  <span>Auto-Transcript: {autoTranscribeEnabled ? 'ON' : 'OFF'}</span>
+                </button>
+              )}
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3">
@@ -605,11 +896,11 @@ export const SimpleVideoView: React.FC = () => {
           </div>
         </div>
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0">
           {isRecording && (
-            <div className="flex items-center gap-2 text-xs font-semibold text-rose-400">
-              <Circle className="w-3 h-3 fill-rose-500 text-rose-500" />
-              <span className="hidden sm:inline">Recording</span>
+            <div className="px-2.5 py-1 rounded-lg bg-rose-500/15 border border-rose-500/30 flex items-center gap-1.5 text-xs font-semibold text-rose-300">
+              <Circle className="w-2.5 h-2.5 fill-rose-500 text-rose-500 animate-pulse" />
+              <span className="hidden sm:inline">AI Auto-Transcript</span>
             </div>
           )}
 
@@ -653,9 +944,18 @@ export const SimpleVideoView: React.FC = () => {
                 />
               ) : (
                 <div className="flex flex-col items-center gap-2">
-                  <div className="w-16 h-16 rounded-full bg-sky-600 flex items-center justify-center text-xl font-bold">
-                    {(currentProfile?.displayName || 'Y').slice(0, 2).toUpperCase()}
-                  </div>
+                  {currentProfile?.avatar ? (
+                    <img
+                      src={currentProfile.avatar}
+                      alt={currentProfile.displayName}
+                      referrerPolicy="no-referrer"
+                      className="w-16 h-16 rounded-full object-cover border-2 border-slate-600"
+                    />
+                  ) : (
+                    <div className="w-16 h-16 rounded-full bg-sky-600 flex items-center justify-center text-xl font-bold">
+                      {(currentProfile?.displayName || 'Y').slice(0, 2).toUpperCase()}
+                    </div>
+                  )}
                   <span className="text-xs text-slate-300">Camera off</span>
                 </div>
               )}
@@ -671,6 +971,7 @@ export const SimpleVideoView: React.FC = () => {
                 <RemoteParticipantTile
                   key={u!.uid}
                   displayName={u!.displayName}
+                  avatar={u!.avatar}
                   stream={remoteStreams[u!.uid]}
                 />
               ))}
@@ -678,9 +979,17 @@ export const SimpleVideoView: React.FC = () => {
         )}
 
         {/* Live Captions */}
-        {showCaptions && liveTranscript && (
+        {showCaptions && (
           <div className="w-full max-w-2xl bg-black/75 border border-slate-700 rounded-xl px-4 py-2.5 text-xs text-slate-100 max-h-24 overflow-y-auto">
-            {liveTranscript.split('\n').slice(-3).join(' · ')}
+            {liveTranscript ? (
+              liveTranscript.split('\n').slice(-3).join(' · ')
+            ) : (
+              <span className="text-slate-400">
+                {isRecording
+                  ? 'AI auto-transcript is listening — full transcript and meeting minutes will be saved automatically when the call ends.'
+                  : 'AI transcription is paused. Tap AI Rec below to resume capturing.'}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -721,14 +1030,14 @@ export const SimpleVideoView: React.FC = () => {
 
         <button
           onClick={toggleRecordingAndTranscript}
-          disabled={currentProfile?.canRecordMeetings === false}
+          disabled={!canRecord}
           className={`min-h-[48px] min-w-[48px] px-3.5 rounded-xl flex items-center justify-center gap-2 text-xs font-semibold transition-colors disabled:opacity-40 ${
             isRecording ? 'bg-rose-600 text-white' : 'bg-slate-800 hover:bg-slate-700 text-slate-100'
           }`}
-          title="Record audio and auto-transcribe with AI"
+          title={isRecording ? 'Pause AI auto-transcript' : 'Start AI auto-transcript'}
         >
           <Circle className={`w-4 h-4 ${isRecording ? 'fill-white' : 'text-rose-400'}`} />
-          <span className="hidden sm:inline">{isRecording ? 'Stop Rec' : 'Record AI'}</span>
+          <span className="hidden sm:inline">{isRecording ? 'AI Rec ON' : 'AI Rec'}</span>
         </button>
 
         <button
@@ -744,7 +1053,7 @@ export const SimpleVideoView: React.FC = () => {
         <button
           onClick={handleEndCall}
           disabled={savingTranscript}
-          className="min-h-[48px] px-5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+          className="min-h-[48px] px-5 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors disabled:opacity-70"
         >
           {savingTranscript ? (
             <>

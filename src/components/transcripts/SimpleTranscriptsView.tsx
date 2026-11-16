@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   FileText,
   Mic,
@@ -11,6 +11,7 @@ import {
   Loader2,
   AlertCircle,
   CheckCircle2,
+  Sparkles,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { MeetingRecord } from '../../types';
@@ -20,6 +21,8 @@ export const SimpleTranscriptsView: React.FC = () => {
     firebaseUser,
     currentProfile,
     meetings,
+    lastTranscribedMeetingId,
+    setLastTranscribedMeetingId,
     saveMeetingTranscript,
     deleteMeetingRecord,
   } = useApp();
@@ -41,10 +44,48 @@ export const SimpleTranscriptsView: React.FC = () => {
     (m) => m.transcriptText || m.aiSummary || m.status === 'completed'
   );
 
+  useEffect(() => {
+    if (!lastTranscribedMeetingId) return;
+    const match = meetings.find((m) => m.id === lastTranscribedMeetingId);
+    if (match) {
+      setSelectedMeeting(match);
+      setLastTranscribedMeetingId(null);
+    }
+  }, [lastTranscribedMeetingId, meetings, setLastTranscribedMeetingId]);
+
   const activeDetail =
     selectedMeeting
       ? meetings.find((m) => m.id === selectedMeeting.id) || selectedMeeting
       : completedMeetings[0] || null;
+
+  const handleGenerateMinutesForDetail = async (m: MeetingRecord) => {
+    if (!m.transcriptText?.trim() || processing) return;
+    setError(null);
+    setProcessing(true);
+    try {
+      const resp = await fetch('/api/ai/meeting-minutes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          meetingTitle: m.title,
+          transcriptText: m.transcriptText,
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) throw new Error(data.error || 'Failed to generate AI minutes.');
+      await saveMeetingTranscript({
+        title: m.title,
+        transcriptText: m.transcriptText,
+        aiSummary: data.summary || '',
+        decisions: data.decisions || [],
+        actionItems: data.actionItems || [],
+      });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to summarize transcript.');
+    } finally {
+      setProcessing(false);
+    }
+  };
 
   const transcribeBlob = async (blob: Blob, titleFallback: string) => {
     setError(null);
@@ -405,16 +446,31 @@ export const SimpleTranscriptsView: React.FC = () => {
                 </div>
               </div>
 
-              {activeDetail.aiSummary && (
+              {activeDetail.aiSummary ? (
                 <div className="space-y-1.5">
                   <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wide">
-                    Summary
+                    AI Summary
                   </h3>
                   <p className="text-sm text-slate-800 leading-relaxed">
                     {activeDetail.aiSummary}
                   </p>
                 </div>
-              )}
+              ) : activeDetail.transcriptText ? (
+                <div className="p-3.5 rounded-xl bg-sky-50 border border-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <p className="text-xs text-sky-900">
+                    Generate an AI summary, decisions, and action items from this transcript:
+                  </p>
+                  <button
+                    type="button"
+                    disabled={processing}
+                    onClick={() => handleGenerateMinutesForDetail(activeDetail)}
+                    className="min-h-[38px] px-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0 disabled:opacity-50"
+                  >
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>{processing ? 'Summarizing...' : 'Generate AI Minutes'}</span>
+                  </button>
+                </div>
+              ) : null}
 
               {activeDetail.decisions && activeDetail.decisions.length > 0 && (
                 <div className="space-y-2">

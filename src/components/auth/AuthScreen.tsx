@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   signInWithPopup,
   signInWithEmailAndPassword,
@@ -26,24 +26,61 @@ export const AuthScreen: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [emailAuthDisabled, setEmailAuthDisabled] = useState(false);
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
+
+  const isUnverifiedUser = Boolean(firebaseUser && !firebaseUser.emailVerified);
+
+  // Automatically check every 4 seconds while waiting on the verification screen
+  useEffect(() => {
+    if (!isUnverifiedUser) return;
+    let active = true;
+    const timer = window.setInterval(async () => {
+      if (!active) return;
+      try {
+        await refreshAuthUser();
+      } catch {
+        // Ignore transient polling errors
+      }
+    }, 4000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [isUnverifiedUser]);
 
   const mapAuthError = (err: any): string => {
     const code = err?.code || '';
-    if (code === 'auth/operation-not-allowed') {
-      return 'Email/Password sign-in is not enabled in Firebase Console yet. Use "Continue with Gmail" below, or enable Email/Password under Authentication → Sign-in method.';
+    if (code === 'auth/operation-not-allowed' || code === 'auth/admin-restricted-operation') {
+      setEmailAuthDisabled(true);
+      return 'Email/Password sign-up is not enabled in Firebase Console yet. Click "Register with Gmail" below to join immediately, or ask the workspace admin to enable Email/Password under Firebase Authentication → Sign-in method.';
     }
     if (code === 'auth/invalid-credential' || code === 'auth/wrong-password' || code === 'auth/user-not-found') {
       return 'Invalid email or password. Please check your credentials and try again.';
     }
     if (code === 'auth/email-already-in-use') {
-      return 'An account with this email already exists. Try signing in instead.';
+      return 'An account with this email already exists. Try signing in or using "Continue with Gmail".';
+    }
+    if (code === 'auth/invalid-email') {
+      return 'Please enter a valid email address.';
     }
     if (code === 'auth/weak-password') {
       return 'Password should be at least 6 characters.';
     }
-    if (code === 'auth/popup-closed-by-user') {
-      return 'Sign-in window was closed before completing.';
+    if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+      return 'Sign-in window was closed before completing. Please try again.';
+    }
+    if (code === 'auth/popup-blocked') {
+      return 'Your browser blocked the Google sign-in popup. Please allow popups for this site and try again.';
+    }
+    if (code === 'auth/unauthorized-domain') {
+      return 'This domain is not authorized for Google Sign-In yet. Add this app domain in Firebase Console → Authentication → Settings → Authorized domains.';
+    }
+    if (code === 'auth/too-many-requests') {
+      return 'Too many attempts. Please wait a minute and try again.';
+    }
+    if (code === 'auth/network-request-failed') {
+      return 'Network error while contacting authentication service. Please check your internet connection.';
     }
     return err?.message || 'Authentication failed. Please try again.';
   };
@@ -65,6 +102,7 @@ export const AuthScreen: React.FC = () => {
     e.preventDefault();
     setError(null);
     setNotice(null);
+    setEmailAuthDisabled(false);
     setLoading(true);
     try {
       await signInWithEmailAndPassword(auth, email.trim(), password);
@@ -79,16 +117,37 @@ export const AuthScreen: React.FC = () => {
     e.preventDefault();
     setError(null);
     setNotice(null);
-    if (!name.trim()) {
-      setError('Please enter your full name.');
+    setEmailAuthDisabled(false);
+
+    const trimmedName = name.trim();
+    const trimmedEmail = email.trim();
+    if (trimmedName.length < 2) {
+      setError('Please enter your full name (at least 2 characters).');
       return;
     }
+    if (!trimmedEmail) {
+      setError('Please enter a valid email address.');
+      return;
+    }
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters.');
+      return;
+    }
+
     setLoading(true);
     try {
-      const cred = await createUserWithEmailAndPassword(auth, email.trim(), password);
-      await updateProfile(cred.user, { displayName: name.trim() });
-      await sendEmailVerification(cred.user);
-      setNotice('Account created. A verification link has been sent to your email.');
+      const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
+      try {
+        await updateProfile(cred.user, { displayName: trimmedName });
+      } catch {
+        // Non-fatal; AppContext also falls back cleanly if displayName is not yet set
+      }
+      try {
+        await sendEmailVerification(cred.user);
+        setNotice(`Account created! A verification link was sent to ${trimmedEmail}.`);
+      } catch (verifyErr) {
+        setError(`Account created, but we could not send the verification email yet: ${mapAuthError(verifyErr)}`);
+      }
     } catch (err) {
       setError(mapAuthError(err));
     } finally {
@@ -122,7 +181,7 @@ export const AuthScreen: React.FC = () => {
     setLoading(true);
     try {
       await sendEmailVerification(auth.currentUser);
-      setNotice('Verification email resent. Please check your inbox.');
+      setNotice('Verification email resent. Please check your inbox and Spam/Junk folder.');
     } catch (err) {
       setError(mapAuthError(err));
     } finally {
@@ -141,7 +200,7 @@ export const AuthScreen: React.FC = () => {
             </div>
             <h1 className="text-xl font-bold text-slate-900">Verify your email</h1>
             <p className="text-sm text-slate-600">
-              We sent a verification link to <span className="font-semibold text-slate-900">{firebaseUser.email}</span>. Open the link in your inbox, then tap Continue.
+              We sent a verification link to <span className="font-semibold text-slate-900">{firebaseUser.email}</span>. Open the link in your inbox (or Spam folder), and you will continue automatically — or tap Continue below.
             </p>
           </div>
 
@@ -162,9 +221,19 @@ export const AuthScreen: React.FC = () => {
           <div className="space-y-3">
             <button
               onClick={async () => {
+                setError(null);
+                setNotice(null);
                 setLoading(true);
-                await refreshAuthUser();
-                setLoading(false);
+                try {
+                  const verified = await refreshAuthUser();
+                  if (!verified) {
+                    setError('Your email is not verified yet. Please click the verification link in your inbox (check Spam/Junk too), then tap Continue.');
+                  }
+                } catch (err) {
+                  setError(mapAuthError(err));
+                } finally {
+                  setLoading(false);
+                }
               }}
               disabled={loading}
               className="w-full min-h-[44px] py-2.5 px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-sm font-semibold transition-colors disabled:opacity-60"
@@ -425,11 +494,49 @@ export const AuthScreen: React.FC = () => {
               </button>
             </form>
 
+            <div className="relative flex items-center justify-center">
+              <div className="border-t border-slate-200 w-full" />
+              <span className="bg-white px-3 text-xs text-slate-400 font-medium shrink-0">or</span>
+              <div className="border-t border-slate-200 w-full" />
+            </div>
+
+            <button
+              type="button"
+              onClick={handleGoogleLogin}
+              disabled={loading}
+              className={`w-full min-h-[44px] py-2.5 px-4 rounded-xl border font-semibold text-sm flex items-center justify-center gap-2.5 transition-colors disabled:opacity-60 ${
+                emailAuthDisabled
+                  ? 'bg-sky-50 hover:bg-sky-100 border-sky-400 text-sky-900 ring-2 ring-sky-500/20'
+                  : 'bg-white hover:bg-slate-50 border-slate-300 text-slate-800'
+              }`}
+            >
+              <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
+                <path
+                  fill="#4285F4"
+                  d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.665-5.17 3.665-9.17Z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.11-6.72-4.96H1.29v3.14C3.26 21.3 7.31 24 12 24Z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M5.28 14.24c-.24-.72-.38-1.49-.38-2.24s.14-1.52.38-2.24V6.62H1.29C.47 8.24 0 10.06 0 12s.47 3.76 1.29 5.38l3.99-3.14Z"
+                />
+                <path
+                  fill="#EA4335"
+                  d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.26 2.7 1.29 6.62l3.99 3.14c.95-2.85 3.6-4.96 6.72-4.96Z"
+                />
+              </svg>
+              <span>Register with Gmail (1-Click)</span>
+            </button>
+
             <button
               type="button"
               onClick={() => {
                 setError(null);
                 setNotice(null);
+                setEmailAuthDisabled(false);
                 setMode('login');
               }}
               className="w-full min-h-[40px] flex items-center justify-center gap-1.5 text-xs font-semibold text-slate-600 hover:text-slate-900"

@@ -58,12 +58,14 @@ interface AppContextType {
   activeTab: AppTab;
   errorBanner: string | null;
   presenceNow: number;
+  lastTranscribedMeetingId: string | null;
 
   setActiveTab: (tab: AppTab) => void;
   setActiveConversationId: (id: string) => void;
   setErrorBanner: (msg: string | null) => void;
+  setLastTranscribedMeetingId: (id: string | null) => void;
   dismissFirstLoginPrompt: () => void;
-  refreshAuthUser: () => Promise<void>;
+  refreshAuthUser: () => Promise<boolean>;
   signOut: () => Promise<void>;
 
   updateMyProfile: (
@@ -147,6 +149,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
   const [authVersion, setAuthVersion] = useState(0);
   const [presenceNow, setPresenceNow] = useState(() => Date.now());
+  const [lastTranscribedMeetingId, setLastTranscribedMeetingId] = useState<string | null>(null);
   const manualStatusRef = useRef<UserStatus | null>(null);
   const currentStatusRef = useRef<UserStatus>('online');
   const activeMeetingRef = useRef<MeetingRecord | null>(null);
@@ -596,12 +599,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [Boolean(activeMeeting), firebaseUser?.uid, firebaseUser?.emailVerified]);
 
-  const refreshAuthUser = async () => {
-    if (auth.currentUser) {
-      await reload(auth.currentUser);
-      setFirebaseUser(auth.currentUser);
-      setAuthVersion((v) => v + 1);
+  const refreshAuthUser = async (): Promise<boolean> => {
+    if (!auth.currentUser) return false;
+    await reload(auth.currentUser);
+    if (auth.currentUser.emailVerified) {
+      // Force refresh ID token so Firestore rules see updated email_verified claim
+      await auth.currentUser.getIdToken(true);
     }
+    setFirebaseUser(auth.currentUser);
+    setAuthVersion((v) => v + 1);
+    return auth.currentUser.emailVerified;
   };
 
   const signOut = async () => {
@@ -1121,12 +1128,44 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     actionItems: string[];
   }): Promise<string> => {
     if (!firebaseUser) return '';
-    const meetingId = data.meetingId || `meet-${Date.now().toString(36)}`;
-    const path = `meetings/${meetingId}`;
+    let targetMeetingId = data.meetingId || `meet-${Date.now().toString(36)}`;
+    let path = `meetings/${targetMeetingId}`;
+
+    const createFreshTranscriptDoc = async () => {
+      const freshId = `meet-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+      path = `meetings/${freshId}`;
+      await setDoc(doc(db, 'meetings', freshId), {
+        title: (data.title || 'Call Transcript').slice(0, 150),
+        organizerId: firebaseUser.uid,
+        organizerName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
+        status: 'completed',
+        scheduledTime: new Date().toLocaleDateString(),
+        isPublic: true,
+        participantIds: [firebaseUser.uid],
+        transcriptText: data.transcriptText.slice(0, 60000),
+        aiSummary: data.aiSummary.slice(0, 5000),
+        decisions: data.decisions.slice(0, 30),
+        actionItems: data.actionItems.slice(0, 30),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      return freshId;
+    };
 
     try {
       if (data.meetingId) {
-        await updateDoc(doc(db, 'meetings', meetingId), {
+        const snap = await getDoc(doc(db, 'meetings', data.meetingId));
+        if (snap.exists() && snap.data()?.status === 'completed') {
+          if (snap.data()?.transcriptText && snap.data()?.aiSummary) {
+            setLastTranscribedMeetingId(data.meetingId);
+            return data.meetingId;
+          }
+          targetMeetingId = await createFreshTranscriptDoc();
+          setLastTranscribedMeetingId(targetMeetingId);
+          return targetMeetingId;
+        }
+
+        await updateDoc(doc(db, 'meetings', targetMeetingId), {
           status: 'completed',
           transcriptText: data.transcriptText.slice(0, 60000),
           aiSummary: data.aiSummary.slice(0, 5000),
@@ -1135,8 +1174,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           updatedAt: serverTimestamp(),
         });
       } else {
-        await setDoc(doc(db, 'meetings', meetingId), {
-          title: data.title.slice(0, 150),
+        await setDoc(doc(db, 'meetings', targetMeetingId), {
+          title: (data.title || 'Meeting Transcript').slice(0, 150),
           organizerId: firebaseUser.uid,
           organizerName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
           status: 'completed',
@@ -1151,7 +1190,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           updatedAt: serverTimestamp(),
         });
       }
-      return meetingId;
+      setLastTranscribedMeetingId(targetMeetingId);
+      return targetMeetingId;
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
@@ -1199,10 +1239,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         activeTab,
         errorBanner,
         presenceNow,
+        lastTranscribedMeetingId,
 
         setActiveTab,
         setActiveConversationId,
         setErrorBanner,
+        setLastTranscribedMeetingId,
         dismissFirstLoginPrompt,
         refreshAuthUser,
         signOut,
