@@ -42,7 +42,7 @@
         },
         "avatar": {
           "type": "string",
-          "maxLength": 1000
+          "maxLength": 65000
         },
         "status": {
           "type": "string",
@@ -173,7 +173,7 @@
         },
         "senderAvatar": {
           "type": "string",
-          "maxLength": 1000
+          "maxLength": 65000
         },
         "content": {
           "type": "string",

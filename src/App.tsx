@@ -9,6 +9,7 @@ import { AppProvider, useApp } from './context/AppContext';
 import { AuthScreen } from './components/auth/AuthScreen';
 import { TopNav } from './components/layout/TopNav';
 import { BottomNav } from './components/layout/BottomNav';
+import { Footer } from './components/layout/Footer';
 import { SimpleChatView } from './components/chat/SimpleChatView';
 import { SimpleVideoView } from './components/video/SimpleVideoView';
 import { SimpleTranscriptsView } from './components/transcripts/SimpleTranscriptsView';
@@ -146,13 +147,14 @@ function MainAppShell() {
         </div>
       )}
 
-      <div className="flex-1 flex overflow-hidden pb-16 md:pb-0">
+      <div className="flex-1 flex overflow-hidden">
         {activeTab === 'chat' && <SimpleChatView />}
         {activeTab === 'video' && <SimpleVideoView />}
         {activeTab === 'transcripts' && <SimpleTranscriptsView />}
         {activeTab === 'account' && <SimpleAccountView />}
       </div>
 
+      <Footer className="mb-16 md:mb-0" />
       <BottomNav />
       <IncomingCallOverlay />
       <OfflineIndicator />

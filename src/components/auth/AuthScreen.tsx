@@ -11,6 +11,7 @@ import { Eye, EyeOff, Mail, Lock, User, ArrowLeft, CheckCircle2, AlertCircle, Sm
 import { auth, googleProvider } from '../../lib/firebase';
 import { useApp } from '../../context/AppContext';
 import { MobileDownloadModal } from '../common/MobileDownloadModal';
+import { Footer } from '../layout/Footer';
 
 type AuthMode = 'login' | 'register' | 'forgot';
 
@@ -187,6 +188,7 @@ export const AuthScreen: React.FC = () => {
             </button>
           </div>
         </div>
+        <Footer className="mt-6 rounded-2xl border border-slate-200 max-w-md" />
       </div>
     );
   }
@@ -494,6 +496,7 @@ export const AuthScreen: React.FC = () => {
       </button>
 
       <MobileDownloadModal isOpen={downloadModalOpen} onClose={() => setDownloadModalOpen(false)} />
+      <Footer className="mt-6 rounded-2xl border border-slate-200 max-w-md" />
     </div>
   );
 };

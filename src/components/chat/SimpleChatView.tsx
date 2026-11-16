@@ -753,6 +753,27 @@ export const SimpleChatView: React.FC = () => {
                 >
                   <ArrowLeft className="w-5 h-5" />
                 </button>
+                {activeConv.type === 'direct' && partner && (
+                  <div className="relative shrink-0">
+                    {partner.avatar ? (
+                      <img
+                        src={partner.avatar}
+                        alt={partner.displayName}
+                        referrerPolicy="no-referrer"
+                        className="w-9 h-9 rounded-full object-cover border border-slate-200"
+                      />
+                    ) : (
+                      <div className="w-9 h-9 rounded-full bg-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center">
+                        {partner.displayName.slice(0, 2).toUpperCase()}
+                      </div>
+                    )}
+                    <span
+                      className={`w-2.5 h-2.5 rounded-full border-2 border-white absolute bottom-0 right-0 ${
+                        STATUS_META[getEffectiveUserStatus(partner, firebaseUser?.uid, presenceNow)].dotClass
+                      }`}
+                    />
+                  </div>
+                )}
                 <div className="min-w-0">
                   <h3 className="text-sm sm:text-base font-bold text-slate-900 truncate">
                     {getConversationTitle(activeConv)}
@@ -829,14 +850,32 @@ export const SimpleChatView: React.FC = () => {
                 messages.map((msg) => {
                   const isMe = msg.senderId === firebaseUser?.uid;
                   const canDelete = isMe || currentProfile?.role === 'admin';
+                  const liveSender = teamUsers.find((u) => u.uid === msg.senderId);
+                  const avatarUrl = liveSender?.avatar || msg.senderAvatar;
 
                   return (
                     <div
                       key={msg.id}
                       className={`flex gap-2.5 group ${isMe ? 'flex-row-reverse' : 'flex-row'}`}
                     >
+                      {avatarUrl ? (
+                        <img
+                          src={avatarUrl}
+                          alt={msg.senderName}
+                          referrerPolicy="no-referrer"
+                          className="w-8 h-8 rounded-full object-cover border border-slate-200 shrink-0 mt-5"
+                        />
+                      ) : (
+                        <div
+                          className={`w-8 h-8 rounded-full text-[11px] font-semibold flex items-center justify-center shrink-0 mt-5 ${
+                            isMe ? 'bg-sky-100 text-sky-700' : 'bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          {(msg.senderName || 'U').slice(0, 2).toUpperCase()}
+                        </div>
+                      )}
                       <div
-                        className={`max-w-[82%] sm:max-w-[68%] flex flex-col ${
+                        className={`max-w-[78%] sm:max-w-[65%] flex flex-col ${
                           isMe ? 'items-end' : 'items-start'
                         }`}
                       >

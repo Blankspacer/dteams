@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   LogOut,
   MessageSquare,
@@ -13,6 +13,9 @@ import {
   Trash2,
   Smartphone,
   QrCode,
+  Camera,
+  Loader2,
+  AlertCircle,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { AddMemberModal } from '../common/AddMemberModal';
@@ -21,6 +24,7 @@ import { PWAInstallButton } from '../common/PWAInstallButton';
 import { UserStatusBadge } from '../common/UserStatusBadge';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { UserStatus } from '../../types';
+import { compressAvatarImage } from '../../utils/avatar';
 import {
   STATUS_META,
   countUsersByPresence,
@@ -49,12 +53,17 @@ export const SimpleAccountView: React.FC = () => {
   const [status, setStatus] = useState<UserStatus>(currentProfile?.status || 'online');
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
+  const [avatarBusy, setAvatarBusy] = useState(false);
+  const [avatarNotice, setAvatarNotice] = useState<string | null>(null);
+  const [avatarError, setAvatarError] = useState<string | null>(null);
+  const [loggingOut, setLoggingOut] = useState(false);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | UserStatus>('all');
   const [copiedLink, setCopiedLink] = useState(false);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement>(null);
   const { downloadLink } = usePWAInstall();
 
   useEffect(() => {
@@ -88,6 +97,50 @@ export const SimpleAccountView: React.FC = () => {
     }
   };
 
+  const handleAvatarSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setAvatarError(null);
+    setAvatarNotice(null);
+    setAvatarBusy(true);
+    try {
+      const compressed = await compressAvatarImage(file);
+      await updateMyProfile({ avatar: compressed });
+      setAvatarNotice('Profile image updated');
+      setTimeout(() => setAvatarNotice(null), 3000);
+    } catch (err) {
+      setAvatarError(err instanceof Error ? err.message : 'Failed to upload profile image.');
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const handleRemoveAvatar = async () => {
+    setAvatarError(null);
+    setAvatarNotice(null);
+    setAvatarBusy(true);
+    try {
+      await updateMyProfile({ avatar: '' });
+      setAvatarNotice('Profile image removed');
+      setTimeout(() => setAvatarNotice(null), 2500);
+    } catch (err) {
+      setAvatarError(err instanceof Error ? err.message : 'Failed to remove profile image.');
+    } finally {
+      setAvatarBusy(false);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await signOut();
+    } finally {
+      setLoggingOut(false);
+    }
+  };
+
   const handleCopyInvite = () => {
     navigator.clipboard.writeText(downloadLink || window.location.origin);
     setCopiedLink(true);
@@ -117,37 +170,103 @@ export const SimpleAccountView: React.FC = () => {
           {/* Account Settings Card */}
           <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-5">
             <div className="flex items-start justify-between gap-4">
-              <div className="flex items-center gap-3 min-w-0">
-                {currentProfile?.avatar ? (
-                  <img
-                    src={currentProfile.avatar}
-                    alt={currentProfile.displayName}
-                    referrerPolicy="no-referrer"
-                    className="w-12 h-12 rounded-full object-cover border border-slate-200 shrink-0"
-                  />
-                ) : (
-                  <div className="w-12 h-12 rounded-full bg-sky-600 text-white font-bold text-base flex items-center justify-center shrink-0">
-                    {(currentProfile?.displayName || firebaseUser?.email || 'U')
-                      .slice(0, 2)
-                      .toUpperCase()}
-                  </div>
-                )}
-                <div className="min-w-0">
+              <div className="flex items-center gap-3.5 min-w-0">
+                <input
+                  ref={avatarInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleAvatarSelected}
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => avatarInputRef.current?.click()}
+                  disabled={avatarBusy}
+                  className="relative group shrink-0 rounded-full focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2"
+                  title="Add or change profile image"
+                  aria-label="Add or change profile image"
+                >
+                  {currentProfile?.avatar ? (
+                    <img
+                      src={currentProfile.avatar}
+                      alt={currentProfile.displayName}
+                      referrerPolicy="no-referrer"
+                      className="w-16 h-16 rounded-full object-cover border border-slate-200"
+                    />
+                  ) : (
+                    <div className="w-16 h-16 rounded-full bg-sky-600 text-white font-bold text-lg flex items-center justify-center">
+                      {(currentProfile?.displayName || firebaseUser?.email || 'U')
+                        .slice(0, 2)
+                        .toUpperCase()}
+                    </div>
+                  )}
+                  <span className="absolute bottom-0 right-0 w-6 h-6 rounded-full bg-slate-900 text-white border-2 border-white flex items-center justify-center shadow-xs group-hover:bg-sky-600 transition-colors">
+                    {avatarBusy ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <Camera className="w-3 h-3" />
+                    )}
+                  </span>
+                </button>
+
+                <div className="min-w-0 space-y-1">
                   <h1 className="text-lg font-bold text-slate-900 truncate">
                     {currentProfile?.displayName || 'Your Account'}
                   </h1>
                   <p className="text-xs text-slate-500 truncate">{firebaseUser?.email}</p>
+                  <div className="flex flex-wrap items-center gap-2 pt-0.5">
+                    <button
+                      type="button"
+                      onClick={() => avatarInputRef.current?.click()}
+                      disabled={avatarBusy}
+                      className="text-xs font-semibold text-sky-600 hover:text-sky-700 disabled:opacity-50"
+                    >
+                      {avatarBusy
+                        ? 'Uploading...'
+                        : currentProfile?.avatar
+                          ? 'Change Profile Image'
+                          : 'Add Profile Image'}
+                    </button>
+                    {currentProfile?.avatar && !avatarBusy && (
+                      <>
+                        <span className="text-slate-300 text-xs">·</span>
+                        <button
+                          type="button"
+                          onClick={handleRemoveAvatar}
+                          className="text-xs font-semibold text-rose-600 hover:text-rose-700"
+                        >
+                          Remove
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
               </div>
 
               <button
-                onClick={signOut}
-                className="min-h-[40px] px-3.5 rounded-xl border border-slate-200 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-700 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0"
+                type="button"
+                onClick={handleLogout}
+                disabled={loggingOut}
+                className="min-h-[40px] px-3.5 rounded-xl border border-slate-200 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-700 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0 disabled:opacity-60"
               >
                 <LogOut className="w-4 h-4" />
-                <span>Sign Out</span>
+                <span>{loggingOut ? 'Logging out...' : 'Log Out'}</span>
               </button>
             </div>
+
+            {avatarError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{avatarError}</span>
+              </div>
+            )}
+
+            {avatarNotice && (
+              <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-700 font-medium flex items-center gap-2">
+                <Check className="w-4 h-4 shrink-0" />
+                <span>{avatarNotice}</span>
+              </div>
+            )}
 
             <form onSubmit={handleSaveProfile} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">

@@ -66,7 +66,9 @@ interface AppContextType {
   refreshAuthUser: () => Promise<void>;
   signOut: () => Promise<void>;
 
-  updateMyProfile: (updates: Partial<Pick<UserProfile, 'displayName' | 'title' | 'department' | 'status'>>) => Promise<void>;
+  updateMyProfile: (
+    updates: Partial<Pick<UserProfile, 'displayName' | 'title' | 'department' | 'avatar' | 'status'>>
+  ) => Promise<void>;
   updateMemberPermissions: (
     targetUid: string,
     updates: Partial<Pick<UserProfile, 'role' | 'canCreateMeetings' | 'canRecordMeetings'>>
@@ -201,7 +203,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             displayName: displayName.slice(0, 80),
             title: isBootstrappedAdmin ? 'Team Lead' : 'Team Member',
             department: 'General',
-            avatar: (firebaseUser!.photoURL || '').slice(0, 1000),
+            avatar: (firebaseUser!.photoURL || '').slice(0, 65000),
             status: 'online' as UserStatus,
             role: (isBootstrappedAdmin ? 'admin' : 'member') as UserRole,
             canCreateMeetings: true,
@@ -603,30 +605,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const signOut = async () => {
+    manualStatusRef.current = null;
+    setActiveMeeting(null);
+    setErrorBanner(null);
+
     if (currentProfile && firebaseUser?.emailVerified) {
       try {
-        await updateDoc(doc(db, 'users', currentProfile.uid), {
-          status: 'offline',
-          updatedAt: serverTimestamp(),
-        });
+        await Promise.race([
+          updateDoc(doc(db, 'users', currentProfile.uid), {
+            status: 'offline',
+            updatedAt: serverTimestamp(),
+          }),
+          new Promise((resolve) => setTimeout(resolve, 1000)),
+        ]);
       } catch {
         // Ignore offline status update failures on sign out
       }
     }
+
     await firebaseSignOut(auth);
+    setActiveTab('chat');
   };
 
   const updateMyProfile = async (
-    updates: Partial<Pick<UserProfile, 'displayName' | 'title' | 'department' | 'status'>>
+    updates: Partial<Pick<UserProfile, 'displayName' | 'title' | 'department' | 'avatar' | 'status'>>
   ) => {
     if (!firebaseUser) return;
     if (updates.status) {
       manualStatusRef.current = updates.status === 'online' ? null : updates.status;
     }
+    const sanitizedUpdates = {
+      ...updates,
+      ...(typeof updates.avatar === 'string'
+        ? { avatar: updates.avatar.slice(0, 65000) }
+        : {}),
+    };
     const path = `users/${firebaseUser.uid}`;
     try {
       await updateDoc(doc(db, 'users', firebaseUser.uid), {
-        ...updates,
+        ...sanitizedUpdates,
         updatedAt: serverTimestamp(),
       });
     } catch (error) {
@@ -876,7 +893,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         conversationId: activeConversationId,
         senderId: firebaseUser.uid,
         senderName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
-        senderAvatar: (currentProfile?.avatar || firebaseUser.photoURL || '').slice(0, 1000),
+        senderAvatar: (currentProfile?.avatar || firebaseUser.photoURL || '').slice(0, 65000),
         content: trimmed || (attachment ? `Shared ${attachment.name}` : ''),
         ciphertext,
         iv,
