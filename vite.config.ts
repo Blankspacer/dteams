@@ -1,5 +1,6 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
+import os from 'os';
 import path from 'path';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
@@ -87,6 +88,7 @@ export default defineConfig(() => {
           type: 'classic',
           navigateFallback: 'index.html',
           navigateFallbackAllowlist: [/^\/$/, /^\/download/],
+          resolveTempFolder: () => path.join(os.tmpdir(), 'spherecall-vite-pwa-dev'),
         },
       }),
     ],
