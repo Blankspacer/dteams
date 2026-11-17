@@ -102,7 +102,6 @@ export const SimpleChatView: React.FC = () => {
     removeMessage,
     createChannel,
     updateGroupMembers,
-    addContactsAndStartChat,
     startDirectChat,
     startVideoCall,
     removeTeamInvite,
@@ -301,50 +300,57 @@ export const SimpleChatView: React.FC = () => {
 
   const channels = conversations.filter((c) => c.type === 'channel');
   const dms = conversations.filter((c) => c.type === 'direct');
-  const otherMembers = sortUsersByPresence(
-    teamUsers.filter((u) => u.uid !== firebaseUser?.uid),
+  const addedUidSet = new Set<string>(contacts.map((c) => c.uid));
+  const addedMembers = sortUsersByPresence(
+    teamUsers.filter((u) => u.uid !== firebaseUser?.uid && addedUidSet.has(u.uid)),
     firebaseUser?.uid,
     presenceNow
   );
-  const presenceCounts = countUsersByPresence(otherMembers, firebaseUser?.uid, presenceNow);
-  const addedUidSet = new Set<string>([
-    ...contacts.map((c) => c.uid),
-    ...dms.flatMap((d) => d.participantIds),
-  ]);
+  const presenceCounts = countUsersByPresence(addedMembers, firebaseUser?.uid, presenceNow);
 
   const matchesPresenceFilter = (uid: string, status: UserStatus) =>
     statusFilter === 'all' ||
-    getEffectiveUserStatus({ uid, status, updatedAt: teamUsers.find((u) => u.uid === uid)?.updatedAt }, firebaseUser?.uid, presenceNow) ===
-      statusFilter;
+    getEffectiveUserStatus(
+      { uid, status, updatedAt: teamUsers.find((u) => u.uid === uid)?.updatedAt },
+      firebaseUser?.uid,
+      presenceNow
+    ) === statusFilter;
 
+  const cleanQuery = search.trim().toLowerCase().replace(/^@/, '');
   const filteredChannels = channels.filter((c) =>
-    c.name.toLowerCase().includes(search.toLowerCase())
+    c.name.toLowerCase().includes(cleanQuery)
   );
-  const filteredAddedMembers = otherMembers.filter(
+  const filteredAddedMembers = addedMembers.filter((u) => {
+    const matchesQ =
+      !cleanQuery ||
+      u.displayName.toLowerCase().includes(cleanQuery) ||
+      (u.username || '').toLowerCase().includes(cleanQuery) ||
+      (u.title || '').toLowerCase().includes(cleanQuery) ||
+      (u.department || '').toLowerCase().includes(cleanQuery);
+    return matchesQ && matchesPresenceFilter(u.uid, u.status);
+  });
+
+  const groupSearchClean = groupMemberSearch.trim().toLowerCase().replace(/^@/, '');
+  const modalFilteredTeammates = addedMembers.filter(
     (u) =>
-      addedUidSet.has(u.uid) &&
-      u.displayName.toLowerCase().includes(search.toLowerCase()) &&
-      matchesPresenceFilter(u.uid, u.status)
-  );
-  const filteredAvailableParticipants = otherMembers.filter(
-    (u) =>
-      !addedUidSet.has(u.uid) &&
-      u.displayName.toLowerCase().includes(search.toLowerCase()) &&
-      matchesPresenceFilter(u.uid, u.status)
+      !groupSearchClean ||
+      u.displayName.toLowerCase().includes(groupSearchClean) ||
+      (u.username || '').toLowerCase().includes(groupSearchClean) ||
+      (u.department || '').toLowerCase().includes(groupSearchClean) ||
+      (u.title || '').toLowerCase().includes(groupSearchClean)
   );
 
-  const modalFilteredTeammates = otherMembers.filter(
-    (u) =>
-      u.displayName.toLowerCase().includes(groupMemberSearch.toLowerCase()) ||
-      (u.department || '').toLowerCase().includes(groupMemberSearch.toLowerCase()) ||
-      (u.title || '').toLowerCase().includes(groupMemberSearch.toLowerCase())
-  );
-
+  const manageSearchClean = manageMemberSearch.trim().toLowerCase().replace(/^@/, '');
   const manageFilteredUsers = teamUsers.filter(
     (u) =>
-      u.displayName.toLowerCase().includes(manageMemberSearch.toLowerCase()) ||
-      (u.department || '').toLowerCase().includes(manageMemberSearch.toLowerCase()) ||
-      (u.title || '').toLowerCase().includes(manageMemberSearch.toLowerCase())
+      (u.uid === firebaseUser?.uid ||
+        addedUidSet.has(u.uid) ||
+        Boolean(activeConv?.participantIds?.includes(u.uid))) &&
+      (!manageSearchClean ||
+        u.displayName.toLowerCase().includes(manageSearchClean) ||
+        (u.username || '').toLowerCase().includes(manageSearchClean) ||
+        (u.department || '').toLowerCase().includes(manageSearchClean) ||
+        (u.title || '').toLowerCase().includes(manageSearchClean))
   );
 
   const canManageActiveGroup =
@@ -402,8 +408,8 @@ export const SimpleChatView: React.FC = () => {
             />
           </div>
 
-          {/* Live Presence Filter & Counts */}
-          {otherMembers.length > 0 && (
+          {/* Live Presence Filter & Counts (Added Contacts Only) */}
+          {addedMembers.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5">
               {(['online', 'busy', 'away', 'offline'] as UserStatus[]).map((st) => {
                 const meta = STATUS_META[st];
@@ -492,19 +498,19 @@ export const SimpleChatView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  setAddMemberInitialTab('invite');
+                  setAddMemberInitialTab('available');
                   setAddMemberOpen(true);
                 }}
                 className="min-h-[32px] px-2.5 rounded-lg bg-slate-100 hover:bg-sky-50 text-sky-700 text-xs font-semibold flex items-center gap-1 transition-colors"
               >
                 <UserPlus className="w-3.5 h-3.5" />
-                <span>Add Member</span>
+                <span>Add User</span>
               </button>
             </div>
             {filteredAddedMembers.length === 0 && pendingInvites.length === 0 ? (
               <div className="px-3 py-3.5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-xs text-slate-500 space-y-2">
                 <p>
-                  No contacts added yet. Add an available participant below or invite a new member to start chatting.
+                  No contacts added yet. Search by <span className="font-semibold text-slate-700">@username</span> or name to add users and see their live status.
                 </p>
                 <button
                   type="button"
@@ -514,8 +520,8 @@ export const SimpleChatView: React.FC = () => {
                   }}
                   className="text-sky-600 hover:text-sky-700 font-semibold inline-flex items-center gap-1"
                 >
-                  <Users className="w-3.5 h-3.5" />
-                  <span>Browse Available Participants</span>
+                  <UserPlus className="w-3.5 h-3.5" />
+                  <span>Find &amp; Add User by @username</span>
                 </button>
               </div>
             ) : (
@@ -576,7 +582,10 @@ export const SimpleChatView: React.FC = () => {
                             </span>
                           </div>
                           <div className="text-xs text-slate-500 truncate">
-                            {matchingDm?.lastMessageText || member.title || meta.label}
+                            {matchingDm?.lastMessageText ||
+                              (member.username ? `@${member.username}` : '') ||
+                              member.title ||
+                              meta.label}
                           </div>
                         </div>
                       </button>
@@ -667,90 +676,6 @@ export const SimpleChatView: React.FC = () => {
               </div>
             )}
           </div>
-
-          {/* Available Participants Currently Using SphereCall */}
-          {filteredAvailableParticipants.length > 0 && (
-            <div>
-              <div className="px-2 pb-1.5 flex items-center justify-between gap-2">
-                <span className="text-xs font-semibold text-slate-500">
-                  Available Participants ({filteredAvailableParticipants.length})
-                </span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAddMemberInitialTab('available');
-                    setAddMemberOpen(true);
-                  }}
-                  className="text-[11px] font-semibold text-sky-600 hover:text-sky-700"
-                >
-                  View all
-                </button>
-              </div>
-              <div className="space-y-1">
-                {filteredAvailableParticipants.map((member) => {
-                  const initials = member.displayName.slice(0, 2).toUpperCase();
-                  const effectiveStatus = getEffectiveUserStatus(
-                    member,
-                    firebaseUser?.uid,
-                    presenceNow
-                  );
-                  const meta = STATUS_META[effectiveStatus];
-                  return (
-                    <div
-                      key={member.uid}
-                      className="w-full min-h-[52px] px-3 py-2 rounded-xl flex items-center justify-between gap-2 bg-slate-50/80 border border-slate-200/70"
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <div className="relative shrink-0">
-                          {member.avatar ? (
-                            <img
-                              src={member.avatar}
-                              alt={member.displayName}
-                              referrerPolicy="no-referrer"
-                              className="w-8 h-8 rounded-full object-cover border border-slate-200"
-                            />
-                          ) : (
-                            <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 font-semibold text-xs flex items-center justify-center">
-                              {initials}
-                            </div>
-                          )}
-                          <span
-                            className={`w-2.5 h-2.5 rounded-full border-2 border-white absolute bottom-0 right-0 ${meta.dotClass}`}
-                            title={meta.label}
-                          />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="text-xs font-semibold text-slate-900 truncate">
-                            {member.displayName}
-                          </div>
-                          <div className="text-[11px] text-slate-500 truncate flex items-center gap-1.5">
-                            <span className={`font-semibold ${meta.textClass}`}>{meta.label}</span>
-                            {(member.title || member.department) && (
-                              <span className="truncate">
-                                · {[member.title, member.department].filter(Boolean).join(' · ')}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          await addContactsAndStartChat([member.uid]);
-                          setMobileShowThread(true);
-                        }}
-                        className="min-h-[32px] px-2.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-1 shrink-0 transition-colors"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>Add</span>
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </div>
       </aside>
 
@@ -799,10 +724,15 @@ export const SimpleChatView: React.FC = () => {
                   </h3>
                   <div className="text-xs text-slate-500 flex items-center gap-1.5">
                     {activeConv.type === 'direct' && partner ? (
-                      <UserStatusBadge
-                        status={getEffectiveUserStatus(partner, firebaseUser?.uid, presenceNow)}
-                        compact
-                      />
+                      <>
+                        {partner.username && (
+                          <span className="font-medium text-slate-600">@{partner.username}</span>
+                        )}
+                        <UserStatusBadge
+                          status={getEffectiveUserStatus(partner, firebaseUser?.uid, presenceNow)}
+                          compact
+                        />
+                      </>
                     ) : (
                       <span>
                         {activeConv.type === 'direct'
@@ -834,7 +764,7 @@ export const SimpleChatView: React.FC = () => {
                     <UserPlus className="w-4 h-4 text-sky-600" />
                     <span className="hidden sm:inline">Add Member</span>
                     <span className="tabular-nums text-slate-500">
-                      ({activeConv.isPublic ? Math.max(teamUsers.length, activeConv.participantIds?.length || 1) : activeConv.participantIds?.length || 1})
+                      ({activeConv.isPublic ? addedMembers.length + 1 : activeConv.participantIds?.length || 1})
                     </span>
                   </button>
                 )}
@@ -844,9 +774,7 @@ export const SimpleChatView: React.FC = () => {
                   onClick={() =>
                     startVideoCall(
                       `Voice Call: ${getConversationTitle(activeConv)}`,
-                      activeConv.isPublic
-                        ? teamUsers.slice(0, 50).map((u) => u.uid)
-                        : activeConv.participantIds,
+                      activeConv.isPublic ? undefined : activeConv.participantIds,
                       'voice'
                     )
                   }
@@ -862,9 +790,7 @@ export const SimpleChatView: React.FC = () => {
                   onClick={() =>
                     startVideoCall(
                       `Call: ${getConversationTitle(activeConv)}`,
-                      activeConv.isPublic
-                        ? teamUsers.slice(0, 50).map((u) => u.uid)
-                        : activeConv.participantIds,
+                      activeConv.isPublic ? undefined : activeConv.participantIds,
                       'video'
                     )
                   }
@@ -1187,14 +1113,14 @@ export const SimpleChatView: React.FC = () => {
                       <UserPlus className="w-3.5 h-3.5" />
                       <span>Invite New</span>
                     </button>
-                    {otherMembers.length > 0 && (
+                    {addedMembers.length > 0 && (
                       <>
                         <span className="text-slate-300">|</span>
                         <button
                           type="button"
                           onClick={() =>
                             setSelectedGroupMemberIds(
-                              otherMembers.slice(0, 49).map((m) => m.uid)
+                              addedMembers.slice(0, 49).map((m) => m.uid)
                             )
                           }
                           className="text-sky-600 hover:text-sky-700 font-semibold"
@@ -1220,7 +1146,7 @@ export const SimpleChatView: React.FC = () => {
                     type="text"
                     value={groupMemberSearch}
                     onChange={(e) => setGroupMemberSearch(e.target.value)}
-                    placeholder="Search teammates to add..."
+                    placeholder="Search added contacts by name or @username..."
                     className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
                   />
                 </div>
@@ -1244,13 +1170,13 @@ export const SimpleChatView: React.FC = () => {
                     </span>
                   </div>
 
-                  {otherMembers.length === 0 ? (
+                  {addedMembers.length === 0 ? (
                     <div className="p-4 text-center text-xs text-slate-500">
-                      No other teammates have signed up yet. You can create the group now and add members anytime once they join.
+                      No contacts added yet. Search and add users by @username first, or create the group now and add members later.
                     </div>
                   ) : modalFilteredTeammates.length === 0 ? (
                     <div className="p-4 text-center text-xs text-slate-500">
-                      No teammates match "{groupMemberSearch}".
+                      No added contacts match "{groupMemberSearch}".
                     </div>
                   ) : (
                     modalFilteredTeammates.map((member) => {
@@ -1294,6 +1220,9 @@ export const SimpleChatView: React.FC = () => {
                                 {member.displayName}
                               </div>
                               <div className="text-[11px] text-slate-500 truncate flex items-center gap-1.5">
+                                {member.username && (
+                                  <span className="font-medium text-slate-600">@{member.username}</span>
+                                )}
                                 <span className={`font-semibold ${meta.textClass}`}>
                                   {meta.label}
                                 </span>
@@ -1435,6 +1364,9 @@ export const SimpleChatView: React.FC = () => {
                             {member.uid === firebaseUser?.uid ? '(You)' : ''}
                           </div>
                           <div className="text-[11px] text-slate-500 truncate flex items-center gap-1.5">
+                            {member.username && (
+                              <span className="font-medium text-slate-600">@{member.username}</span>
+                            )}
                             <span className={`font-semibold ${meta.textClass}`}>{meta.label}</span>
                             <span>
                               ·{' '}

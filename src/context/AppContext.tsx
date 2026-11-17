@@ -42,7 +42,19 @@ import {
 import { encryptE2EEMessage, generateUserFingerprint } from '../utils/crypto';
 import { sounds } from '../utils/audio';
 import { formatMoMForChat } from '../utils/transcript';
-import { formatScheduledValue, parseScheduledMeeting } from '../utils/calendar';
+import {
+  formatScheduledValue,
+  getSavedTimeZone,
+  isValidTimeZone,
+  parseScheduledMeeting,
+  setSavedTimeZone,
+} from '../utils/calendar';
+import {
+  consumePendingSignupUsername,
+  deriveDefaultUsername,
+  isValidUsername,
+  normalizeUsername,
+} from '../utils/username';
 
 interface AppContextType {
   firebaseUser: FirebaseUser | null;
@@ -63,18 +75,25 @@ interface AppContextType {
   errorBanner: string | null;
   presenceNow: number;
   lastTranscribedMeetingId: string | null;
+  selectedTimezone: string;
 
   setActiveTab: (tab: AppTab) => void;
   setActiveCallMode: (mode: 'voice' | 'video') => void;
   setActiveConversationId: (id: string) => void;
   setErrorBanner: (msg: string | null) => void;
   setLastTranscribedMeetingId: (id: string | null) => void;
+  setSelectedTimezone: (tz: string) => Promise<void>;
   dismissFirstLoginPrompt: () => void;
   refreshAuthUser: () => Promise<boolean>;
   signOut: () => Promise<void>;
 
   updateMyProfile: (
-    updates: Partial<Pick<UserProfile, 'displayName' | 'title' | 'department' | 'avatar' | 'status'>>
+    updates: Partial<
+      Pick<
+        UserProfile,
+        'displayName' | 'username' | 'timezone' | 'title' | 'department' | 'avatar' | 'status'
+      >
+    >
   ) => Promise<void>;
   updateMemberPermissions: (
     targetUid: string,
@@ -110,6 +129,7 @@ interface AppContextType {
     title: string;
     date: string;
     time: string;
+    timeZone?: string;
     mode?: 'voice' | 'video';
     participantIds?: string[];
   }) => Promise<MeetingRecord | null>;
@@ -119,6 +139,7 @@ interface AppContextType {
       title: string;
       date: string;
       time: string;
+      timeZone?: string;
       mode?: 'voice' | 'video';
       participantIds?: string[];
     }
@@ -188,7 +209,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [authVersion, setAuthVersion] = useState(0);
   const [presenceNow, setPresenceNow] = useState(() => Date.now());
   const [lastTranscribedMeetingId, setLastTranscribedMeetingId] = useState<string | null>(null);
+  const [selectedTimezone, setSelectedTimezoneState] = useState<string>(() => getSavedTimeZone());
   const manualStatusRef = useRef<UserStatus | null>(null);
+  const preCallStatusRef = useRef<UserStatus>('online');
+  const wasInCallRef = useRef<boolean>(false);
+  const manualInCallOverrideRef = useRef<boolean>(false);
   const currentStatusRef = useRef<UserStatus>('online');
   const activeMeetingRef = useRef<MeetingRecord | null>(null);
 
@@ -239,10 +264,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             firebaseUser!.displayName?.trim() ||
             firebaseUser!.email?.split('@')[0] ||
             'Team Member';
+          const pendingHandle = consumePendingSignupUsername(firebaseUser!.email);
+          const initialUsername =
+            pendingHandle ||
+            deriveDefaultUsername(firebaseUser!.email || displayName, uid);
+          const initialTimezone = getSavedTimeZone();
 
           const profilePayload = {
             uid,
             displayName: displayName.slice(0, 80),
+            username: initialUsername,
+            timezone: initialTimezone.slice(0, 64),
             title: isBootstrappedAdmin ? 'Team Lead' : 'Team Member',
             department: 'General',
             avatar: (firebaseUser!.photoURL || '').slice(0, 65000),
@@ -258,11 +290,25 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           await setDoc(doc(db, 'users', uid), profilePayload);
           setIsFirstLogin(true);
         } else {
-          const existingStatus = (userSnap.data()?.status || 'offline') as UserStatus;
-          await updateDoc(doc(db, 'users', uid), {
+          const existingData = userSnap.data() || {};
+          const existingStatus = (existingData.status || 'offline') as UserStatus;
+          const updates: Record<string, unknown> = {
             status: existingStatus === 'offline' || existingStatus === 'away' ? 'online' : existingStatus,
             updatedAt: serverTimestamp(),
-          });
+          };
+          if (!existingData.username) {
+            updates.username =
+              consumePendingSignupUsername(firebaseUser!.email) ||
+              deriveDefaultUsername(
+                firebaseUser!.email || existingData.displayName || 'user',
+                uid
+              );
+          }
+          if (typeof existingData.timezone === 'string' && isValidTimeZone(existingData.timezone)) {
+            setSavedTimeZone(existingData.timezone);
+            setSelectedTimezoneState(existingData.timezone);
+          }
+          await updateDoc(doc(db, 'users', uid), updates);
         }
       } catch (error) {
         handleFirestoreError(error, OperationType.WRITE, userPath);
@@ -619,24 +665,39 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [firebaseUser?.uid, firebaseUser?.emailVerified, Boolean(currentProfile)]);
 
-  // Auto-mark user as Busy during active calls (unless manually overridden)
+  // Auto-mark user as Busy during active calls and restore previous status when call ends
   useEffect(() => {
     if (!firebaseUser || !firebaseUser.emailVerified || !currentProfile) return;
-    if (manualStatusRef.current) return;
 
     const uid = firebaseUser.uid;
-    if (activeMeeting && currentProfile.status === 'online') {
-      updateDoc(doc(db, 'users', uid), {
-        status: 'busy',
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
-    } else if (!activeMeeting && currentProfile.status === 'busy') {
-      updateDoc(doc(db, 'users', uid), {
-        status: 'online',
-        updatedAt: serverTimestamp(),
-      }).catch(() => {});
+    if (activeMeeting) {
+      if (!wasInCallRef.current) {
+        wasInCallRef.current = true;
+        manualInCallOverrideRef.current = false;
+        preCallStatusRef.current =
+          currentProfile.status !== 'busy' ? currentProfile.status : manualStatusRef.current || 'online';
+      }
+      if (currentProfile.status !== 'busy' && !manualInCallOverrideRef.current) {
+        updateDoc(doc(db, 'users', uid), {
+          status: 'busy',
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
+    } else if (wasInCallRef.current) {
+      wasInCallRef.current = false;
+      manualInCallOverrideRef.current = false;
+      const restoreStatus =
+        preCallStatusRef.current && preCallStatusRef.current !== 'busy'
+          ? preCallStatusRef.current
+          : 'online';
+      if (currentProfile.status === 'busy') {
+        updateDoc(doc(db, 'users', uid), {
+          status: restoreStatus,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
     }
-  }, [Boolean(activeMeeting), firebaseUser?.uid, firebaseUser?.emailVerified]);
+  }, [Boolean(activeMeeting), currentProfile?.status, firebaseUser?.uid, firebaseUser?.emailVerified]);
 
   const refreshAuthUser = async (): Promise<boolean> => {
     if (!auth.currentUser) return false;
@@ -673,19 +734,69 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveTab('chat');
   };
 
+  const setSelectedTimezone = async (tz: string) => {
+    if (!isValidTimeZone(tz)) return;
+    setSavedTimeZone(tz);
+    setSelectedTimezoneState(tz);
+    if (firebaseUser?.uid && firebaseUser.emailVerified) {
+      try {
+        await updateDoc(doc(db, 'users', firebaseUser.uid), {
+          timezone: tz.slice(0, 64),
+          updatedAt: serverTimestamp(),
+        });
+      } catch {
+        // Non-fatal; localStorage still persists timezone
+      }
+    }
+  };
+
   const updateMyProfile = async (
-    updates: Partial<Pick<UserProfile, 'displayName' | 'title' | 'department' | 'avatar' | 'status'>>
+    updates: Partial<
+      Pick<
+        UserProfile,
+        'displayName' | 'username' | 'timezone' | 'title' | 'department' | 'avatar' | 'status'
+      >
+    >
   ) => {
     if (!firebaseUser) return;
     if (updates.status) {
       manualStatusRef.current = updates.status === 'online' ? null : updates.status;
+      if (activeMeetingRef.current) {
+        manualInCallOverrideRef.current = true;
+      }
     }
-    const sanitizedUpdates = {
-      ...updates,
-      ...(typeof updates.avatar === 'string'
-        ? { avatar: updates.avatar.slice(0, 65000) }
-        : {}),
-    };
+
+    const sanitizedUpdates: Record<string, unknown> = { ...updates };
+    if (typeof updates.avatar === 'string') {
+      sanitizedUpdates.avatar = updates.avatar.slice(0, 65000);
+    }
+    if (typeof updates.username === 'string') {
+      const cleanUsername = normalizeUsername(updates.username);
+      if (!isValidUsername(cleanUsername)) {
+        throw new Error(
+          'Username must be 3–30 characters using lowercase letters, numbers, "_", ".", or "-".'
+        );
+      }
+      const duplicate = teamUsers.some(
+        (u) =>
+          u.uid !== firebaseUser.uid &&
+          (u.username || '').toLowerCase() === cleanUsername
+      );
+      if (duplicate) {
+        throw new Error(`@${cleanUsername} is already taken. Please choose another username.`);
+      }
+      sanitizedUpdates.username = cleanUsername;
+    }
+    if (typeof updates.timezone === 'string') {
+      if (isValidTimeZone(updates.timezone)) {
+        setSavedTimeZone(updates.timezone);
+        setSelectedTimezoneState(updates.timezone);
+        sanitizedUpdates.timezone = updates.timezone.slice(0, 64);
+      } else {
+        delete sanitizedUpdates.timezone;
+      }
+    }
+
     const path = `users/${firebaseUser.uid}`;
     try {
       await updateDoc(doc(db, 'users', firebaseUser.uid), {
@@ -1011,6 +1122,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     try {
+      if (currentProfile && currentProfile.status !== 'busy') {
+        preCallStatusRef.current = currentProfile.status;
+      }
+      wasInCallRef.current = true;
+      manualInCallOverrideRef.current = false;
+      updateDoc(doc(db, 'users', firebaseUser.uid), {
+        status: 'busy',
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+
       await setDoc(doc(db, 'meetings', meetingId), record);
       const created: MeetingRecord = { id: meetingId, ...record };
       setActiveCallMode(mode);
@@ -1027,6 +1148,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     title: string;
     date: string;
     time: string;
+    timeZone?: string;
     mode?: 'voice' | 'video';
     participantIds?: string[];
   }): Promise<MeetingRecord | null> => {
@@ -1048,7 +1170,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       organizerId: firebaseUser.uid,
       organizerName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
       status: 'upcoming',
-      scheduledTime: formatScheduledValue(params.date, params.time),
+      scheduledTime: formatScheduledValue(params.date, params.time, params.timeZone || selectedTimezone),
       isPublic: !params.participantIds || params.participantIds.length === 0,
       participantIds: participants,
       transcriptText: '',
@@ -1076,6 +1198,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       title: string;
       date: string;
       time: string;
+      timeZone?: string;
       mode?: 'voice' | 'video';
       participantIds?: string[];
     }
@@ -1093,7 +1216,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       await updateDoc(doc(db, 'meetings', meetingId), {
         title: finalTitle.slice(0, 150),
-        scheduledTime: formatScheduledValue(params.date, params.time),
+        scheduledTime: formatScheduledValue(params.date, params.time, params.timeZone || selectedTimezone),
         isPublic: !params.participantIds || params.participantIds.length === 0,
         participantIds: participants,
         updatedAt: serverTimestamp(),
@@ -1114,7 +1237,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       conversations[0];
     if (!targetConv) return false;
 
-    const parsed = parseScheduledMeeting(meeting.scheduledTime);
+    const parsed = parseScheduledMeeting(meeting.scheduledTime, selectedTimezone);
     const whenText = parsed ? parsed.displayFull : meeting.scheduledTime || 'Upcoming';
     const typeLabel = meeting.title.toLowerCase().includes('voice') ? 'Voice Call' : 'Video Meeting';
     const text = `Scheduled ${typeLabel}: "${meeting.title}"\nDate & Time: ${whenText}\nOrganizer: ${meeting.organizerName}\nOpen the Calendar or Calls tab to join when it starts.`.slice(0, 5000);
@@ -1171,6 +1294,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       mode || (meeting.title.toLowerCase().includes('voice') ? 'voice' : 'video');
     const path = `meetings/${meeting.id}`;
     try {
+      if (currentProfile && currentProfile.status !== 'busy') {
+        preCallStatusRef.current = currentProfile.status;
+      }
+      wasInCallRef.current = true;
+      manualInCallOverrideRef.current = false;
+      updateDoc(doc(db, 'users', firebaseUser.uid), {
+        status: 'busy',
+        updatedAt: serverTimestamp(),
+      }).catch(() => {});
+
       await updateDoc(doc(db, 'meetings', meeting.id), {
         status: 'live',
         participantIds: updatedParticipants,
@@ -1306,6 +1439,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       handleFirestoreError(error, OperationType.UPDATE, path);
     } finally {
       setActiveMeeting(null);
+      if (firebaseUser && wasInCallRef.current) {
+        wasInCallRef.current = false;
+        manualInCallOverrideRef.current = false;
+        const restoreStatus =
+          preCallStatusRef.current && preCallStatusRef.current !== 'busy'
+            ? preCallStatusRef.current
+            : 'online';
+        updateDoc(doc(db, 'users', firebaseUser.uid), {
+          status: restoreStatus,
+          updatedAt: serverTimestamp(),
+        }).catch(() => {});
+      }
     }
   };
 
@@ -1583,12 +1728,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         errorBanner,
         presenceNow,
         lastTranscribedMeetingId,
+        selectedTimezone,
 
         setActiveTab,
         setActiveCallMode,
         setActiveConversationId,
         setErrorBanner,
         setLastTranscribedMeetingId,
+        setSelectedTimezone,
         dismissFirstLoginPrompt,
         refreshAuthUser,
         signOut,

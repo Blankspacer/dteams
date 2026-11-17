@@ -1,6 +1,6 @@
 import express from 'express';
 import dotenv from 'dotenv';
-import { GoogleGenAI, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -23,6 +23,58 @@ const ai = new GoogleGenAI({
     },
   },
 });
+
+const aiBeta = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY || '',
+  apiVersion: 'v1beta',
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    },
+  },
+});
+
+function extractGeminiError(err: unknown): { status?: number; message: string } {
+  const raw = err instanceof Error ? err.message : String(err || 'Unknown AI error');
+  const statusProp = (err as { status?: number })?.status;
+  try {
+    const parsed = JSON.parse(raw);
+    const inner = parsed?.error || parsed;
+    return {
+      status: typeof inner?.code === 'number' ? inner.code : statusProp,
+      message: String(inner?.message || raw),
+    };
+  } catch {
+    return { status: statusProp, message: raw };
+  }
+}
+
+function isTransientError(err: unknown): boolean {
+  const { status, message } = extractGeminiError(err);
+  return (
+    status === 429 ||
+    status === 503 ||
+    status === 500 ||
+    /high demand|unavailable|resource_exhausted|rate limit|timeout/i.test(message)
+  );
+}
+
+async function withRetry<T>(fn: () => Promise<T>, maxAttempts = 2): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt < maxAttempts && isTransientError(err)) {
+        await new Promise((r) => setTimeout(r, 800 * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastErr;
+}
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', time: new Date().toISOString() });
@@ -146,63 +198,86 @@ async function summarizeTranscript(
   const participantsContext =
     participantList.length > 0 ? `\nParticipants: ${participantList.join(', ')}` : '';
   const todayContext = `Current date: ${new Date().toDateString()}`;
-
-  const response = await ai.models.generateContent({
-    model: 'gemini-4-hydrogen',
-    contents: `You are an AI Meeting Assistant. Analyze this meeting transcript carefully and extract structured Meeting Minutes (MoM).\n\n${todayContext}\nMeeting Title: ${safeTitle}${participantsContext}\nTranscript:\n${transcript}`,
-    config: {
-      systemInstruction:
-        'You are a precision AI Meeting Assistant for team meetings. Extract concise executive summaries, important discussion points, clear decisions, actionable tasks with who is responsible (assignedTo) and deadlines, and a well-formatted formal Minutes of Meeting (MoM) text in JSON. If an owner or deadline is not explicitly stated, infer reasonably from context or use "Team" / "TBD".',
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          summary: {
-            type: Type.STRING,
-            description: '2-3 sentence executive summary of the meeting discussion and outcomes.',
-          },
-          discussionPoints: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Important discussion points covered during the meeting.',
-          },
-          decisions: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-            description: 'Key decisions approved or finalized during the meeting.',
-          },
-          tasks: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                task: {
-                  type: Type.STRING,
-                  description: 'Clear description of the action item or task.',
-                },
-                assignedTo: {
-                  type: Type.STRING,
-                  description: 'Person, role, or team responsible for completing the task.',
-                },
-                deadline: {
-                  type: Type.STRING,
-                  description: 'Target due date or timeframe mentioned (or "TBD" if none stated).',
-                },
-              },
-              required: ['task', 'assignedTo', 'deadline'],
+  const promptText = `You are an AI Meeting Assistant. Analyze this meeting transcript carefully and extract structured Meeting Minutes (MoM).\n\n${todayContext}\nMeeting Title: ${safeTitle}${participantsContext}\nTranscript:\n${transcript}`;
+  const responseSchema = {
+    type: Type.OBJECT,
+    properties: {
+      summary: {
+        type: Type.STRING,
+        description: '2-3 sentence executive summary of the meeting discussion and outcomes.',
+      },
+      discussionPoints: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Important discussion points covered during the meeting.',
+      },
+      decisions: {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: 'Key decisions approved or finalized during the meeting.',
+      },
+      tasks: {
+        type: Type.ARRAY,
+        items: {
+          type: Type.OBJECT,
+          properties: {
+            task: {
+              type: Type.STRING,
+              description: 'Clear description of the action item or task.',
             },
-            description: 'Structured action items with responsible owner and deadline.',
+            assignedTo: {
+              type: Type.STRING,
+              description: 'Person, role, or team responsible for completing the task.',
+            },
+            deadline: {
+              type: Type.STRING,
+              description: 'Target due date or timeframe mentioned (or "TBD" if none stated).',
+            },
           },
-          momText: {
-            type: Type.STRING,
-            description:
-              'Complete, formatted plain-text Minutes of Meeting (MoM) including Title, Attendees, Summary, Discussion Points, Decisions, and Action Items with Assignee and Deadline.',
-          },
+          required: ['task', 'assignedTo', 'deadline'],
         },
-        required: ['summary', 'discussionPoints', 'decisions', 'tasks', 'momText'],
+        description: 'Structured action items with responsible owner and deadline.',
+      },
+      momText: {
+        type: Type.STRING,
+        description:
+          'Complete, formatted plain-text Minutes of Meeting (MoM) including Title, Attendees, Summary, Discussion Points, Decisions, and Action Items with Assignee and Deadline.',
       },
     },
-  });
+    required: ['summary', 'discussionPoints', 'decisions', 'tasks', 'momText'],
+  };
+
+  const sysInstruction =
+    'You are a precision AI Meeting Assistant for team meetings. Extract concise executive summaries, important discussion points, clear decisions, actionable tasks with who is responsible (assignedTo) and deadlines, and a well-formatted formal Minutes of Meeting (MoM) text in JSON. If an owner or deadline is not explicitly stated, infer reasonably from context or use "Team" / "TBD".';
+
+  let response;
+  try {
+    response = await withRetry(() =>
+      ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: promptText,
+        config: {
+          systemInstruction: sysInstruction,
+          thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+          responseMimeType: 'application/json',
+          responseSchema,
+        },
+      })
+    );
+  } catch (primaryErr) {
+    console.warn('gemini-4-hydrogen summary failed, falling back to gemini-3.1-flash-lite:', extractGeminiError(primaryErr).message);
+    response = await withRetry(() =>
+      ai.models.generateContent({
+        model: 'gemini-3.1-flash-lite',
+        contents: promptText,
+        config: {
+          systemInstruction: sysInstruction,
+          responseMimeType: 'application/json',
+          responseSchema,
+        },
+      })
+    );
+  }
 
   const text = (response.text ?? '{}').trim();
   const parsed = JSON.parse(text);
@@ -323,19 +398,58 @@ app.post('/api/ai/transcribe-meeting', async (req, res) => {
             ? ` Participants in this call: ${participantNames.slice(0, 20).join(', ')}.`
             : '';
 
-        const transcribeResp = await ai.models.generateContent({
-          model: 'gemini-3.5-transcribe',
-          contents: {
-            parts: [
-              audioPart,
-              {
-                text: `Transcribe this call/meeting audio accurately and clearly. Format distinct speaker turns on new lines when speakers change.${speakersHint}`,
-              },
-            ],
-          },
-        });
+        const transcribePrompt = `Transcribe this call/meeting audio accurately and clearly. Format distinct speaker turns on new lines when speakers change. If the audio contains no intelligible speech, respond with an empty string.${speakersHint}`;
 
-        transcriptText = (transcribeResp.text || '').trim();
+        const transcribeCandidates: Array<{
+          label: string;
+          run: () => Promise<{ text?: string }>;
+        }> = [
+          {
+            label: 'v1beta/gemini-3.5-transcribe',
+            run: () =>
+              aiBeta.models.generateContent({
+                model: 'gemini-3.5-transcribe',
+                contents: { parts: [audioPart, { text: transcribePrompt }] },
+              }),
+          },
+          {
+            label: 'v1/gemini-4-hydrogen',
+            run: () =>
+              ai.models.generateContent({
+                model: 'gemini-4-hydrogen',
+                contents: { parts: [audioPart, { text: transcribePrompt }] },
+                config: { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } },
+              }),
+          },
+          {
+            label: 'v1/gemini-3.1-flash-lite',
+            run: () =>
+              ai.models.generateContent({
+                model: 'gemini-3.1-flash-lite',
+                contents: { parts: [audioPart, { text: transcribePrompt }] },
+              }),
+          },
+        ];
+
+        let lastTranscribeErr: unknown = null;
+        for (const candidate of transcribeCandidates) {
+          try {
+            const transcribeResp = await withRetry(candidate.run);
+            transcriptText = (transcribeResp.text || '').trim();
+            lastTranscribeErr = null;
+            break;
+          } catch (err) {
+            lastTranscribeErr = err;
+            console.warn(
+              `Audio transcription candidate ${candidate.label} failed:`,
+              extractGeminiError(err).message
+            );
+          }
+        }
+
+        if (lastTranscribeErr && !fallbackNotes) {
+          throw lastTranscribeErr;
+        }
       }
     }
 
@@ -367,8 +481,9 @@ app.post('/api/ai/transcribe-meeting', async (req, res) => {
     });
   } catch (error: any) {
     console.error('Error transcribing meeting audio:', error);
-    return res.status(500).json({
-      error: error?.message || 'Failed to transcribe meeting audio.',
+    const { status, message } = extractGeminiError(error);
+    return res.status(status && status >= 400 && status < 600 ? status : 500).json({
+      error: message || 'Failed to transcribe meeting audio.',
     });
   }
 });
@@ -401,8 +516,9 @@ app.post('/api/ai/meeting-minutes', async (req, res) => {
     });
   } catch (error: any) {
     console.error('Error generating meeting minutes:', error);
-    return res.status(500).json({
-      error: error?.message || 'Failed to generate meeting minutes.',
+    const { status, message } = extractGeminiError(error);
+    return res.status(status && status >= 400 && status < 600 ? status : 500).json({
+      error: message || 'Failed to generate meeting minutes.',
     });
   }
 });

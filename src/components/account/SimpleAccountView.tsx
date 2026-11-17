@@ -18,6 +18,9 @@ import {
   AlertCircle,
   Bell,
   Volume2,
+  Globe,
+  AtSign,
+  UserMinus,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useMeetingNotifications } from '../../context/NotificationContext';
@@ -28,6 +31,8 @@ import { UserStatusBadge } from '../common/UserStatusBadge';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { UserStatus } from '../../types';
 import { compressAvatarImage } from '../../utils/avatar';
+import { getAvailableTimeZones } from '../../utils/calendar';
+import { isValidUsername, normalizeUsername } from '../../utils/username';
 import {
   STATUS_META,
   countUsersByPresence,
@@ -40,9 +45,13 @@ export const SimpleAccountView: React.FC = () => {
     firebaseUser,
     currentProfile,
     teamUsers,
+    contacts,
     teamInvites,
+    selectedTimezone,
+    setSelectedTimezone,
     updateMyProfile,
     updateMemberPermissions,
+    removeContact,
     startDirectChat,
     startVideoCall,
     removeTeamInvite,
@@ -51,11 +60,14 @@ export const SimpleAccountView: React.FC = () => {
   } = useApp();
 
   const [displayName, setDisplayName] = useState(currentProfile?.displayName || '');
+  const [username, setUsername] = useState(currentProfile?.username || '');
+  const [timezone, setTimezone] = useState(currentProfile?.timezone || selectedTimezone);
   const [title, setTitle] = useState(currentProfile?.title || '');
   const [department, setDepartment] = useState(currentProfile?.department || '');
   const [status, setStatus] = useState<UserStatus>(currentProfile?.status || 'online');
   const [saving, setSaving] = useState(false);
   const [savedNotice, setSavedNotice] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
   const [avatarBusy, setAvatarBusy] = useState(false);
   const [avatarNotice, setAvatarNotice] = useState<string | null>(null);
   const [avatarError, setAvatarError] = useState<string | null>(null);
@@ -68,6 +80,7 @@ export const SimpleAccountView: React.FC = () => {
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
   const avatarInputRef = useRef<HTMLInputElement>(null);
   const { downloadLink } = usePWAInstall();
+  const timeZones = React.useMemo(() => getAvailableTimeZones(), []);
   const {
     permission: notifPermission,
     remindersEnabled,
@@ -81,11 +94,13 @@ export const SimpleAccountView: React.FC = () => {
   useEffect(() => {
     if (currentProfile) {
       setDisplayName(currentProfile.displayName || '');
+      setUsername(currentProfile.username || '');
+      setTimezone(currentProfile.timezone || selectedTimezone);
       setTitle(currentProfile.title || '');
       setDepartment(currentProfile.department || '');
       setStatus(currentProfile.status || 'online');
     }
-  }, [currentProfile]);
+  }, [currentProfile, selectedTimezone]);
 
   const isAdmin =
     currentProfile?.role === 'admin' || firebaseUser?.email === 'sneloy@gmail.com';
@@ -93,17 +108,33 @@ export const SimpleAccountView: React.FC = () => {
   const handleSaveProfile = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!displayName.trim() || saving) return;
-    setSaving(true);
+    setProfileError(null);
     setSavedNotice(false);
+
+    const cleanUsername = normalizeUsername(username);
+    if (!isValidUsername(cleanUsername)) {
+      setProfileError(
+        'Username must be 3–30 characters using lowercase letters, numbers, "_", ".", or "-".'
+      );
+      return;
+    }
+
+    setSaving(true);
     try {
       await updateMyProfile({
         displayName: displayName.trim().slice(0, 80),
+        username: cleanUsername,
+        timezone,
         title: title.trim().slice(0, 80),
         department: department.trim().slice(0, 50),
         status,
       });
+      await setSelectedTimezone(timezone);
+      setUsername(cleanUsername);
       setSavedNotice(true);
       setTimeout(() => setSavedNotice(false), 2500);
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : 'Failed to save profile.');
     } finally {
       setSaving(false);
     }
@@ -159,15 +190,26 @@ export const SimpleAccountView: React.FC = () => {
     setTimeout(() => setCopiedLink(false), 2500);
   };
 
-  const sortedTeam = sortUsersByPresence(teamUsers, firebaseUser?.uid, presenceNow);
-  const presenceCounts = countUsersByPresence(teamUsers, firebaseUser?.uid, presenceNow);
+  const addedUidSet = new Set<string>(contacts.map((c) => c.uid));
+  const visibleDirectoryUsers = sortUsersByPresence(
+    teamUsers.filter((u) => u.uid === firebaseUser?.uid || addedUidSet.has(u.uid)),
+    firebaseUser?.uid,
+    presenceNow
+  );
+  const presenceCounts = countUsersByPresence(
+    visibleDirectoryUsers,
+    firebaseUser?.uid,
+    presenceNow
+  );
 
-  const filteredTeam = sortedTeam.filter((u) => {
-    const q = search.toLowerCase();
+  const cleanSearch = search.trim().toLowerCase().replace(/^@/, '');
+  const filteredTeam = visibleDirectoryUsers.filter((u) => {
     const matchesSearch =
-      u.displayName.toLowerCase().includes(q) ||
-      (u.title || '').toLowerCase().includes(q) ||
-      (u.department || '').toLowerCase().includes(q);
+      !cleanSearch ||
+      u.displayName.toLowerCase().includes(cleanSearch) ||
+      (u.username || '').toLowerCase().includes(cleanSearch) ||
+      (u.title || '').toLowerCase().includes(cleanSearch) ||
+      (u.department || '').toLowerCase().includes(cleanSearch);
     const matchesStatus =
       statusFilter === 'all' ||
       getEffectiveUserStatus(u, firebaseUser?.uid, presenceNow) === statusFilter;
@@ -225,7 +267,12 @@ export const SimpleAccountView: React.FC = () => {
                   <h1 className="text-lg font-bold text-slate-900 truncate">
                     {currentProfile?.displayName || 'Your Account'}
                   </h1>
-                  <p className="text-xs text-slate-500 truncate">{firebaseUser?.email}</p>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                    {currentProfile?.username && (
+                      <span className="font-semibold text-sky-700">@{currentProfile.username}</span>
+                    )}
+                    <span className="truncate">{firebaseUser?.email}</span>
+                  </div>
                   <div className="flex flex-wrap items-center gap-2 pt-0.5">
                     <button
                       type="button"
@@ -280,6 +327,13 @@ export const SimpleAccountView: React.FC = () => {
               </div>
             )}
 
+            {profileError && (
+              <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 shrink-0" />
+                <span>{profileError}</span>
+              </div>
+            )}
+
             <form onSubmit={handleSaveProfile} className="space-y-4">
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                 <div>
@@ -297,6 +351,23 @@ export const SimpleAccountView: React.FC = () => {
 
                 <div>
                   <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Username (@handle)
+                  </label>
+                  <div className="relative">
+                    <AtSign className="w-4 h-4 text-slate-400 absolute left-3 top-3.5" />
+                    <input
+                      type="text"
+                      required
+                      value={username}
+                      onChange={(e) => setUsername(normalizeUsername(e.target.value))}
+                      placeholder="your_username"
+                      className="w-full min-h-[44px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3.5 text-sm text-slate-900 focus:outline-none focus:border-sky-600 focus:bg-white"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
                     Availability Status
                   </label>
                   <select
@@ -309,6 +380,26 @@ export const SimpleAccountView: React.FC = () => {
                     <option value="away">Away</option>
                     <option value="offline">Appear Offline</option>
                   </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Time Zone
+                  </label>
+                  <div className="relative">
+                    <Globe className="w-4 h-4 text-slate-400 absolute left-3 top-3.5 pointer-events-none" />
+                    <select
+                      value={timezone}
+                      onChange={(e) => setTimezone(e.target.value)}
+                      className="w-full min-h-[44px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3.5 text-xs font-medium text-slate-900 focus:outline-none focus:border-sky-600 focus:bg-white"
+                    >
+                      {timeZones.map((tz) => (
+                        <option key={tz.value} value={tz.value}>
+                          {tz.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
                 <div>
@@ -404,17 +495,17 @@ export const SimpleAccountView: React.FC = () => {
             <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
               <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
                 <UserPlus className="w-4 h-4 text-sky-600" />
-                <h2>Add Teammates</h2>
+                <h2>Find &amp; Add Users</h2>
               </div>
               <p className="text-xs text-slate-600 leading-relaxed">
-                Add coworkers by email or invite them directly. Everyone who signs in appears in your directory automatically.
+                New accounts start private—you only see users and their live status (online, busy, away) once you search by @username or name and add them.
               </p>
               <button
                 onClick={() => setAddMemberOpen(true)}
                 className="w-full min-h-[44px] px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
               >
                 <UserPlus className="w-4 h-4" />
-                <span>Add Member</span>
+                <span>Search &amp; Add User</span>
               </button>
             </div>
 
@@ -507,15 +598,15 @@ export const SimpleAccountView: React.FC = () => {
           </div>
         </div>
 
-        {/* Team Directory Card */}
+        {/* Added Contacts Directory Card */}
         <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-bold text-slate-900">
-                Team Directory ({teamUsers.length})
+                Added Contacts &amp; Status ({visibleDirectoryUsers.length})
               </h2>
               <p className="text-xs text-slate-500">
-                Start a direct message or video call with anyone on your team.
+                Users you add persist across every login with live online, busy, away, and offline status.
               </p>
             </div>
 
@@ -526,7 +617,7 @@ export const SimpleAccountView: React.FC = () => {
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search teammates..."
+                  placeholder="Search added contacts or @username..."
                   className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
                 />
               </div>
@@ -536,7 +627,7 @@ export const SimpleAccountView: React.FC = () => {
                 className="min-h-[40px] px-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
               >
                 <UserPlus className="w-4 h-4" />
-                <span>Add Member</span>
+                <span>Add User</span>
               </button>
             </div>
           </div>
@@ -552,7 +643,7 @@ export const SimpleAccountView: React.FC = () => {
                   : 'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'
               }`}
             >
-              All ({teamUsers.length})
+              All ({visibleDirectoryUsers.length})
             </button>
             {(['online', 'busy', 'away', 'offline'] as UserStatus[]).map((st) => {
               const meta = STATUS_META[st];
@@ -575,6 +666,21 @@ export const SimpleAccountView: React.FC = () => {
               );
             })}
           </div>
+
+          {visibleDirectoryUsers.length <= 1 && (
+            <div className="p-3.5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-xs text-slate-600 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <span>
+                You have not added any contacts yet. Search by <span className="font-semibold text-slate-800">@username</span> or name to add people and view their live status.
+              </span>
+              <button
+                type="button"
+                onClick={() => setAddMemberOpen(true)}
+                className="text-sky-600 hover:text-sky-700 font-semibold shrink-0 text-left"
+              >
+                + Find &amp; Add User
+              </button>
+            </div>
+          )}
 
           <div className="divide-y divide-slate-100">
             {filteredTeam.map((member) => {
@@ -611,14 +717,19 @@ export const SimpleAccountView: React.FC = () => {
                     </div>
 
                     <div className="min-w-0">
-                      <div className="text-sm font-semibold text-slate-900 truncate flex items-center gap-2">
+                      <div className="text-sm font-semibold text-slate-900 truncate flex flex-wrap items-center gap-2">
                         <span className="truncate">
                           {member.displayName} {isMe ? '(You)' : ''}
                         </span>
+                        {member.username && (
+                          <span className="text-xs font-medium text-sky-700">
+                            @{member.username}
+                          </span>
+                        )}
                         <UserStatusBadge status={effectiveStatus} />
                       </div>
                       <div className="text-xs text-slate-500 truncate mt-0.5">
-                        {[member.title, member.department].filter(Boolean).join(' · ') || 'Team Member'}
+                        {[member.title, member.department].filter(Boolean).join(' · ') || 'Member'}
                       </div>
                     </div>
                   </div>
@@ -643,6 +754,15 @@ export const SimpleAccountView: React.FC = () => {
                       >
                         <Video className="w-3.5 h-3.5" />
                         <span>Call</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => removeContact(member.uid)}
+                        className="min-h-[40px] min-w-[40px] rounded-xl border border-slate-200 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-600 text-slate-400 flex items-center justify-center transition-colors"
+                        title={`Remove ${member.displayName} from contacts`}
+                        aria-label={`Remove ${member.displayName} from contacts`}
+                      >
+                        <UserMinus className="w-4 h-4" />
                       </button>
                     </div>
                   )}
@@ -737,7 +857,7 @@ export const SimpleAccountView: React.FC = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-sm">
-                  {teamUsers.map((member) => {
+                  {visibleDirectoryUsers.map((member) => {
                     const isSelf = member.uid === firebaseUser?.uid;
                     return (
                       <tr key={member.uid}>
@@ -745,7 +865,10 @@ export const SimpleAccountView: React.FC = () => {
                           <div className="font-semibold text-slate-900">
                             {member.displayName} {isSelf ? '(You)' : ''}
                           </div>
-                          <div className="text-xs text-slate-500">{member.title || 'Member'}</div>
+                          <div className="text-xs text-slate-500">
+                            {member.username ? `@${member.username} · ` : ''}
+                            {member.title || 'Member'}
+                          </div>
                         </td>
                         <td className="py-3 px-3">
                           <select

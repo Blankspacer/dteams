@@ -5,6 +5,8 @@ export type AppTab = 'chat' | 'video' | 'calendar' | 'transcripts' | 'account';
 export interface UserProfile {
   uid: string;
   displayName: string;
+  username?: string;
+  timezone?: string;
   title?: string;
   department?: string;
   avatar?: string;

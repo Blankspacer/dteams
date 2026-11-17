@@ -360,6 +360,11 @@ export const TopNav: React.FC = () => {
                 )}
                 <div className="min-w-0">
                   <div className="text-xs font-bold text-slate-900 truncate">{displayName}</div>
+                  {currentProfile?.username && (
+                    <div className="text-[11px] font-semibold text-sky-700 truncate">
+                      @{currentProfile.username}
+                    </div>
+                  )}
                   <div className="text-[11px] text-slate-500 truncate">{firebaseUser?.email}</div>
                 </div>
               </div>

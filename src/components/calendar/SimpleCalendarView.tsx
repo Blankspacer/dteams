@@ -17,6 +17,7 @@ import {
   Plus,
   Bell,
   BellRing,
+  Globe,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useMeetingNotifications } from '../../context/NotificationContext';
@@ -25,8 +26,12 @@ import {
   CALENDAR_TIME_SLOTS,
   formatDateKey,
   formatDisplayDate,
+  formatScheduledValue,
   formatTime12h,
+  formatTimeDual,
+  getAvailableTimeZones,
   getMonthCalendarDays,
+  getTimeZoneShortName,
   parseScheduledMeeting,
 } from '../../utils/calendar';
 import { getEffectiveUserStatus, sortUsersByPresence } from '../../utils/presence';
@@ -39,8 +44,11 @@ export const SimpleCalendarView: React.FC = () => {
   const {
     firebaseUser,
     teamUsers,
+    contacts,
     meetings,
     presenceNow,
+    selectedTimezone,
+    setSelectedTimezone,
     scheduleMeeting,
     rescheduleMeeting,
     shareScheduledMeetingToChat,
@@ -59,13 +67,31 @@ export const SimpleCalendarView: React.FC = () => {
   } = useMeetingNotifications();
 
   const today = new Date();
-  const todayKey = formatDateKey(today);
+  const todayKey = formatDateKey(today, selectedTimezone);
+  const timeZones = useMemo(() => getAvailableTimeZones(), []);
+  const selectedTzShort = getTimeZoneShortName(selectedTimezone, presenceNow);
+  const currentTimeInZone = useMemo(() => {
+    try {
+      const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: selectedTimezone,
+        hour: '2-digit',
+        minute: '2-digit',
+        hourCycle: 'h23',
+      }).formatToParts(new Date(presenceNow));
+      const h = parts.find((p) => p.type === 'hour')?.value || '00';
+      const m = parts.find((p) => p.type === 'minute')?.value || '00';
+      return formatTimeDual(`${h === '24' ? '00' : h}:${m}`);
+    } catch {
+      return '';
+    }
+  }, [selectedTimezone, presenceNow]);
 
   const [viewMonth, setViewMonth] = useState<Date>(
     () => new Date(today.getFullYear(), today.getMonth(), 1)
   );
   const [selectedDate, setSelectedDate] = useState<string>(todayKey);
   const [selectedTime, setSelectedTime] = useState<string>('10:00');
+  const [slotPeriodFilter, setSlotPeriodFilter] = useState<'all' | 'am' | 'pm'>('all');
   const [meetingTitle, setMeetingTitle] = useState<string>('');
   const [meetingMode, setMeetingMode] = useState<'video' | 'voice'>('video');
   const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
@@ -99,7 +125,7 @@ export const SimpleCalendarView: React.FC = () => {
 
     for (const meeting of meetings) {
       if (meeting.status !== 'upcoming' && meeting.status !== 'live') continue;
-      const parsed = parseScheduledMeeting(meeting.scheduledTime);
+      const parsed = parseScheduledMeeting(meeting.scheduledTime, selectedTimezone);
       if (!parsed) continue;
       items.push({
         meeting,
@@ -110,7 +136,7 @@ export const SimpleCalendarView: React.FC = () => {
 
     items.sort((a, b) => a.parsed.sortValue - b.parsed.sortValue);
     return items;
-  }, [meetings]);
+  }, [meetings, selectedTimezone]);
 
   const eventsByDate = useMemo(() => {
     const map = new Map<string, typeof scheduledEvents>();
@@ -141,15 +167,27 @@ export const SimpleCalendarView: React.FC = () => {
     [scheduledEvents]
   );
 
+  const addedUidSet = useMemo(() => new Set(contacts.map((c) => c.uid)), [contacts]);
+
   const otherTeammates = useMemo(
     () =>
       sortUsersByPresence(
-        teamUsers.filter((u) => u.uid !== firebaseUser?.uid),
+        teamUsers.filter((u) => u.uid !== firebaseUser?.uid && addedUidSet.has(u.uid)),
         firebaseUser?.uid,
         presenceNow
       ),
-    [teamUsers, firebaseUser?.uid, presenceNow]
+    [teamUsers, firebaseUser?.uid, addedUidSet, presenceNow]
   );
+
+  const filteredTimeSlots = useMemo(() => {
+    if (slotPeriodFilter === 'am') {
+      return CALENDAR_TIME_SLOTS.filter((slot) => Number(slot.slice(0, 2)) < 12);
+    }
+    if (slotPeriodFilter === 'pm') {
+      return CALENDAR_TIME_SLOTS.filter((slot) => Number(slot.slice(0, 2)) >= 12);
+    }
+    return CALENDAR_TIME_SLOTS;
+  }, [slotPeriodFilter]);
 
   const selectDateAndSyncMonth = (dateKey: string) => {
     setSelectedDate(dateKey);
@@ -175,7 +213,7 @@ export const SimpleCalendarView: React.FC = () => {
   };
 
   const startEditingMeeting = (meeting: MeetingRecord) => {
-    const parsed = parseScheduledMeeting(meeting.scheduledTime);
+    const parsed = parseScheduledMeeting(meeting.scheduledTime, selectedTimezone);
     setEditingMeetingId(meeting.id);
     const isVoice = meeting.title.toLowerCase().includes('voice');
     setMeetingMode(isVoice ? 'voice' : 'video');
@@ -208,6 +246,7 @@ export const SimpleCalendarView: React.FC = () => {
           title: meetingTitle,
           date: selectedDate,
           time: selectedTime,
+          timeZone: selectedTimezone,
           mode: meetingMode,
           participantIds: selectedParticipantIds,
         });
@@ -216,7 +255,7 @@ export const SimpleCalendarView: React.FC = () => {
           setLastScheduled({
             ...updated,
             title: meetingTitle.trim() || updated.title,
-            scheduledTime: `${selectedDate} · ${selectedTime}`,
+            scheduledTime: formatScheduledValue(selectedDate, selectedTime, selectedTimezone),
           });
         }
         resetForm(true);
@@ -225,6 +264,7 @@ export const SimpleCalendarView: React.FC = () => {
           title: meetingTitle,
           date: selectedDate,
           time: selectedTime,
+          timeZone: selectedTimezone,
           mode: meetingMode,
           participantIds: selectedParticipantIds,
         });
@@ -276,12 +316,28 @@ export const SimpleCalendarView: React.FC = () => {
                 Meeting Calendar &amp; Scheduler
               </h1>
               <p className="text-xs text-slate-500">
-                Select any date and time slot on the calendar to schedule voice or video meetings with your team.
+                24-hour AM &amp; PM scheduling · Now in <span className="font-semibold text-slate-700">{selectedTzShort}</span>: {currentTimeInZone}
               </p>
             </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
+            <div className="flex items-center gap-1.5 px-2.5 min-h-[38px] rounded-xl border border-slate-200 bg-slate-50">
+              <Globe className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+              <select
+                value={selectedTimezone}
+                onChange={(e) => setSelectedTimezone(e.target.value)}
+                aria-label="Select calendar time zone"
+                className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none max-w-[200px]"
+              >
+                {timeZones.map((tz) => (
+                  <option key={tz.value} value={tz.value}>
+                    {tz.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
             <span className="px-3 py-1.5 rounded-lg bg-slate-100 text-slate-700 text-xs font-semibold tabular-nums">
               {upcomingOnlyEvents.length} Upcoming
             </span>
@@ -650,8 +706,9 @@ export const SimpleCalendarView: React.FC = () => {
                     {editingMeetingId ? 'Reschedule Meeting' : 'Schedule a Meeting'}
                   </h2>
                   <p className="text-xs text-slate-500">
-                    Picked date: <span className="font-semibold text-slate-700">{formatDisplayDate(selectedDate)}</span> at{' '}
-                    <span className="font-semibold text-slate-700">{formatTime12h(selectedTime)}</span>
+                    Picked: <span className="font-semibold text-slate-700">{formatDisplayDate(selectedDate)}</span> at{' '}
+                    <span className="font-semibold text-slate-700">{formatTimeDual(selectedTime)}</span>{' '}
+                    <span className="text-slate-400">({selectedTzShort})</span>
                   </p>
                 </div>
                 {editingMeetingId && (
@@ -670,7 +727,7 @@ export const SimpleCalendarView: React.FC = () => {
                 <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 space-y-2">
                   <div className="text-xs font-semibold text-emerald-900">
                     Scheduled "{lastScheduled.title}" for{' '}
-                    {parseScheduledMeeting(lastScheduled.scheduledTime)?.displayFull ||
+                    {parseScheduledMeeting(lastScheduled.scheduledTime, selectedTimezone)?.displayFull ||
                       lastScheduled.scheduledTime}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
@@ -744,7 +801,28 @@ export const SimpleCalendarView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Exact Date & Custom Time Inputs */}
+              {/* Time Zone Selector */}
+              <div className="space-y-1.5">
+                <label className="block text-xs font-semibold text-slate-700">
+                  Time Zone
+                </label>
+                <div className="relative">
+                  <Globe className="w-4 h-4 text-slate-400 absolute left-3 top-3 pointer-events-none" />
+                  <select
+                    value={selectedTimezone}
+                    onChange={(e) => setSelectedTimezone(e.target.value)}
+                    className="w-full min-h-[42px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 text-xs font-medium text-slate-900 focus:outline-none focus:border-sky-600 focus:bg-white"
+                  >
+                    {timeZones.map((tz) => (
+                      <option key={tz.value} value={tz.value}>
+                        {tz.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+
+              {/* Exact Date & Custom 24-Hour Time Inputs */}
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <label className="block text-xs font-semibold text-slate-700">
@@ -764,7 +842,7 @@ export const SimpleCalendarView: React.FC = () => {
                 </div>
                 <div className="space-y-1.5">
                   <label className="block text-xs font-semibold text-slate-700">
-                    Time
+                    Time (24h &amp; AM/PM)
                   </label>
                   <input
                     type="time"
@@ -777,21 +855,40 @@ export const SimpleCalendarView: React.FC = () => {
                     required
                     className="w-full min-h-[42px] bg-slate-50 border border-slate-200 rounded-xl px-3 text-xs font-medium text-slate-900 focus:outline-none focus:border-sky-600 focus:bg-white"
                   />
+                  <div className="text-[11px] font-medium text-slate-500 tabular-nums">
+                    {formatTimeDual(selectedTime)} · {selectedTzShort}
+                  </div>
                 </div>
               </div>
 
-              {/* Quick Time Slots Grid */}
-              <div className="space-y-1.5">
-                <div className="flex items-center justify-between text-xs">
-                  <span className="font-semibold text-slate-700">Quick Time Slots</span>
-                  {bookedTimesOnSelectedDate.size > 0 && (
-                    <span className="text-[11px] text-amber-700 font-medium">
-                      • Amber = booked on this day
-                    </span>
-                  )}
+              {/* 24-Hour AM & PM Quick Time Slots Grid */}
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                  <span className="font-semibold text-slate-700">24-Hour Time Slots (AM &amp; PM)</span>
+                  <div className="inline-flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-[11px] font-semibold">
+                    {(['all', 'am', 'pm'] as const).map((period) => (
+                      <button
+                        key={period}
+                        type="button"
+                        onClick={() => setSlotPeriodFilter(period)}
+                        className={`px-2 py-0.5 rounded-md transition-colors ${
+                          slotPeriodFilter === period
+                            ? 'bg-sky-600 text-white'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {period === 'all' ? 'All 24h' : period.toUpperCase()}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                <div className="grid grid-cols-4 gap-1.5 max-h-44 overflow-y-auto pr-1">
-                  {CALENDAR_TIME_SLOTS.map((slot) => {
+                {bookedTimesOnSelectedDate.size > 0 && (
+                  <div className="text-[11px] text-amber-700 font-medium">
+                    • Amber slots already have a scheduled meeting on this date
+                  </div>
+                )}
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-52 overflow-y-auto pr-1">
+                  {filteredTimeSlots.map((slot) => {
                     const active = selectedTime === slot;
                     const booked = bookedTimesOnSelectedDate.has(slot);
                     return (
@@ -799,7 +896,7 @@ export const SimpleCalendarView: React.FC = () => {
                         key={slot}
                         type="button"
                         onClick={() => setSelectedTime(slot)}
-                        className={`py-2 px-1 rounded-lg border text-[11px] font-semibold tabular-nums transition-colors ${
+                        className={`py-1.5 px-1.5 rounded-lg border text-center tabular-nums transition-colors ${
                           active
                             ? 'bg-sky-600 border-sky-600 text-white'
                             : booked
@@ -807,18 +904,21 @@ export const SimpleCalendarView: React.FC = () => {
                               : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
                         }`}
                       >
-                        {formatTime12h(slot)}
+                        <div className="text-[11px] font-bold leading-tight">{slot}</div>
+                        <div className={`text-[10px] leading-tight ${active ? 'text-sky-100' : 'text-slate-500'}`}>
+                          {formatTime12h(slot)}
+                        </div>
                       </button>
                     );
                   })}
                 </div>
               </div>
 
-              {/* Invite Teammates */}
+              {/* Invite Added Contacts */}
               <div className="space-y-2 pt-1 border-t border-slate-100">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-semibold text-slate-700">
-                    Invite Team ({selectedParticipantIds.length === 0 ? 'All Team' : `${selectedParticipantIds.length} selected`})
+                    Invite Contacts ({selectedParticipantIds.length === 0 ? 'Private / Open' : `${selectedParticipantIds.length} selected`})
                   </span>
                   <button
                     type="button"
@@ -826,13 +926,13 @@ export const SimpleCalendarView: React.FC = () => {
                     className="text-sky-600 hover:text-sky-700 font-semibold flex items-center gap-1"
                   >
                     <UserPlus className="w-3.5 h-3.5" />
-                    <span>Invite Member</span>
+                    <span>Add User</span>
                   </button>
                 </div>
 
                 {otherTeammates.length === 0 ? (
                   <p className="text-[11px] text-slate-500">
-                    No other teammates signed up yet. Scheduled meetings will be open to your team.
+                    No contacts added yet. Search and add a user by @username to invite them directly.
                   </p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-36 overflow-y-auto pr-1">
@@ -848,15 +948,22 @@ export const SimpleCalendarView: React.FC = () => {
                           key={user.uid}
                           type="button"
                           onClick={() => toggleParticipant(user.uid)}
-                          className={`min-h-[38px] px-2.5 py-1.5 rounded-lg border text-left flex items-center justify-between gap-2 text-xs transition-colors ${
+                          className={`min-h-[42px] px-2.5 py-1.5 rounded-lg border text-left flex items-center justify-between gap-2 text-xs transition-colors ${
                             checked
                               ? 'border-sky-600 bg-sky-50 text-sky-900'
                               : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
                           }`}
                         >
-                          <div className="min-w-0 flex items-center gap-1.5">
-                            <span className="font-medium truncate">{user.displayName}</span>
-                            <UserStatusBadge status={effectiveStatus} compact />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="font-medium truncate">{user.displayName}</span>
+                              <UserStatusBadge status={effectiveStatus} compact />
+                            </div>
+                            {user.username && (
+                              <div className="text-[10px] text-slate-500 truncate">
+                                @{user.username}
+                              </div>
+                            )}
                           </div>
                           {checked && <Check className="w-3.5 h-3.5 text-sky-600 shrink-0" />}
                         </button>

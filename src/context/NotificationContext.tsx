@@ -140,6 +140,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     firebaseUser,
     meetings,
     activeMeeting,
+    selectedTimezone,
     joinVideoCall,
     setActiveTab,
   } = useApp();
@@ -355,7 +356,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
           meeting.participantIds.includes(firebaseUser.uid);
         if (!isInvited) continue;
 
-        const parsed = parseScheduledMeeting(meeting.scheduledTime);
+        const parsed = parseScheduledMeeting(meeting.scheduledTime, selectedTimezone);
         if (!parsed) continue;
 
         const startMs = parsed.sortValue;
@@ -409,6 +410,7 @@ export const NotificationProvider: React.FC<{ children: React.ReactNode }> = ({ 
     meetings,
     activeMeeting?.id,
     remindersEnabled,
+    selectedTimezone,
     triggerAlertEffects,
   ]);
 

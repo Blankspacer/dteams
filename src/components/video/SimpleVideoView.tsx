@@ -43,43 +43,106 @@ function readBlobAsDataUrl(blob: Blob): Promise<string> {
 
 const RemoteParticipantTile: React.FC<{
   displayName: string;
+  username?: string;
   avatar?: string;
   stream?: MediaStream;
-}> = ({ displayName, avatar, stream }) => {
+  audioUnlockTick: number;
+  onAudioBlocked?: (blocked: boolean) => void;
+}> = ({ displayName, username, avatar, stream, audioUnlockTick, onAudioBlocked }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const [hasVideo, setHasVideo] = useState(false);
+  const [hasAudio, setHasAudio] = useState(false);
+  const [audioBlocked, setAudioBlocked] = useState(false);
+
+  const attemptAudioPlay = () => {
+    const audioEl = audioRef.current;
+    if (!audioEl || !audioEl.srcObject) return;
+    audioEl.muted = false;
+    audioEl.volume = 1;
+    const playPromise = audioEl.play?.();
+    if (playPromise && typeof playPromise.then === 'function') {
+      playPromise
+        .then(() => {
+          setAudioBlocked(false);
+          onAudioBlocked?.(false);
+        })
+        .catch(() => {
+          setAudioBlocked(true);
+          onAudioBlocked?.(true);
+        });
+    }
+  };
 
   useEffect(() => {
     if (!stream) {
       setHasVideo(false);
+      setHasAudio(false);
+      setAudioBlocked(false);
       if (audioRef.current) audioRef.current.srcObject = null;
       if (videoRef.current) videoRef.current.srcObject = null;
       return;
     }
-    if (audioRef.current) {
-      audioRef.current.srcObject = stream;
-      audioRef.current.play?.().catch(() => {});
-    }
-    if (videoRef.current) {
-      videoRef.current.srcObject = stream;
-    }
-    const checkTracks = () => {
+
+    const syncTracks = () => {
       const videoTracks = stream.getVideoTracks();
+      const audioTracks = stream.getAudioTracks();
       setHasVideo(videoTracks.some((t) => t.readyState === 'live' && t.enabled));
+      setHasAudio(audioTracks.some((t) => t.readyState === 'live'));
+
+      if (audioRef.current) {
+        if (audioTracks.length > 0) {
+          audioRef.current.srcObject = new MediaStream(audioTracks);
+          attemptAudioPlay();
+        } else {
+          audioRef.current.srcObject = null;
+        }
+      }
+      if (videoRef.current) {
+        if (videoTracks.length > 0) {
+          videoRef.current.srcObject = new MediaStream(videoTracks);
+          videoRef.current.play?.().catch(() => {});
+        } else {
+          videoRef.current.srcObject = null;
+        }
+      }
     };
-    checkTracks();
-    stream.addEventListener('addtrack', checkTracks);
-    stream.addEventListener('removetrack', checkTracks);
+
+    syncTracks();
+    stream.addEventListener('addtrack', syncTracks);
+    stream.addEventListener('removetrack', syncTracks);
+    stream.getTracks().forEach((t) => {
+      t.addEventListener('unmute', syncTracks);
+      t.addEventListener('mute', syncTracks);
+    });
+
     return () => {
-      stream.removeEventListener('addtrack', checkTracks);
-      stream.removeEventListener('removetrack', checkTracks);
+      stream.removeEventListener('addtrack', syncTracks);
+      stream.removeEventListener('removetrack', syncTracks);
+      stream.getTracks().forEach((t) => {
+        t.removeEventListener('unmute', syncTracks);
+        t.removeEventListener('mute', syncTracks);
+      });
     };
   }, [stream]);
 
+  useEffect(() => {
+    if (audioUnlockTick > 0) {
+      attemptAudioPlay();
+    }
+  }, [audioUnlockTick]);
+
   return (
     <div className="aspect-video bg-slate-800 rounded-2xl overflow-hidden border border-slate-700 relative flex items-center justify-center">
-      {stream && <audio ref={audioRef} autoPlay playsInline className="sr-only" />}
+      {stream && (
+        <audio
+          ref={audioRef}
+          autoPlay
+          playsInline
+          data-remote-call-audio="true"
+          className="sr-only"
+        />
+      )}
       {stream && (
         <video
           ref={videoRef}
@@ -109,12 +172,17 @@ const RemoteParticipantTile: React.FC<{
             )}
           </div>
           <span className="text-sm font-semibold">{displayName}</span>
+          {username && (
+            <span className="text-[11px] font-mono text-slate-400">@{username}</span>
+          )}
           <span className="text-[11px] text-slate-400 flex items-center gap-1">
-            {stream ? (
+            {stream && hasAudio ? (
               <>
                 <Volume2 className="w-3.5 h-3.5 text-emerald-400" />
-                <span>Voice connected</span>
+                <span>{audioBlocked ? 'Tap Enable Audio above' : 'Voice connected'}</span>
               </>
+            ) : stream ? (
+              <span>Connecting audio...</span>
             ) : (
               <span>Ringing...</span>
             )}
@@ -123,9 +191,10 @@ const RemoteParticipantTile: React.FC<{
       )}
       <div className="absolute bottom-3 left-3 px-2.5 py-1 rounded-lg bg-black/60 text-xs font-medium flex items-center gap-1.5">
         <span
-          className={`w-2 h-2 rounded-full ${stream ? 'bg-emerald-400' : 'bg-amber-400'}`}
+          className={`w-2 h-2 rounded-full ${stream && hasAudio ? 'bg-emerald-400' : 'bg-amber-400'}`}
         />
         <span>{displayName}</span>
+        {stream && hasAudio && <Volume2 className="w-3 h-3 text-emerald-400" />}
       </div>
     </div>
   );
@@ -136,9 +205,11 @@ export const SimpleVideoView: React.FC = () => {
     firebaseUser,
     currentProfile,
     teamUsers,
+    contacts,
     meetings,
     activeMeeting,
     activeCallMode,
+    selectedTimezone,
     startVideoCall,
     joinVideoCall,
     addCallParticipants,
@@ -176,6 +247,8 @@ export const SimpleVideoView: React.FC = () => {
   const [savedClipRecord, setSavedClipRecord] = useState<MeetingRecord | null>(null);
   const [mediaError, setMediaError] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [remoteAudioBlocked, setRemoteAudioBlocked] = useState(false);
+  const [audioUnlockTick, setAudioUnlockTick] = useState(0);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const screenVideoRef = useRef<HTMLVideoElement>(null);
@@ -197,12 +270,17 @@ export const SimpleVideoView: React.FC = () => {
     participantNames: string[];
   } | null>(null);
 
+  const addedUidSet = new Set(contacts.map((c) => c.uid));
+  const addedTeammates = teamUsers.filter(
+    (u) => u.uid !== firebaseUser?.uid && addedUidSet.has(u.uid)
+  );
+
   const liveCalls = meetings.filter((m) => m.status === 'live');
   const upcomingCalls = meetings
     .filter((m) => m.status === 'upcoming')
     .map((meeting) => ({
       meeting,
-      parsed: parseScheduledMeeting(meeting.scheduledTime),
+      parsed: parseScheduledMeeting(meeting.scheduledTime, selectedTimezone),
       isVoice: meeting.title.toLowerCase().includes('voice'),
     }))
     .sort((a, b) => (a.parsed?.sortValue || 0) - (b.parsed?.sortValue || 0));
@@ -214,6 +292,16 @@ export const SimpleVideoView: React.FC = () => {
     participantIds: activeMeeting?.participantIds || [],
     localStream,
   });
+
+  const unlockRemoteAudio = () => {
+    setAudioUnlockTick((t) => t + 1);
+    setRemoteAudioBlocked(false);
+    document.querySelectorAll<HTMLAudioElement>('audio[data-remote-call-audio="true"]').forEach((el) => {
+      el.muted = false;
+      el.volume = 1;
+      el.play?.().catch(() => {});
+    });
+  };
 
   useEffect(() => {
     liveTranscriptRef.current = liveTranscript;
@@ -619,17 +707,23 @@ export const SimpleVideoView: React.FC = () => {
       let stream: MediaStream | null = null;
       let cameraFallback = false;
 
+      const audioConstraints: MediaTrackConstraints = {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      };
+
       try {
         stream = await navigator.mediaDevices.getUserMedia({
-          video: wantVideo,
-          audio: true,
+          video: wantVideo ? { facingMode: 'user' } : false,
+          audio: audioConstraints,
         });
       } catch {
         if (wantVideo) {
           try {
             stream = await navigator.mediaDevices.getUserMedia({
               video: false,
-              audio: true,
+              audio: audioConstraints,
             });
             cameraFallback = true;
           } catch {
@@ -647,6 +741,10 @@ export const SimpleVideoView: React.FC = () => {
         stream.getTracks().forEach((t) => t.stop());
         return;
       }
+
+      stream.getAudioTracks().forEach((t) => {
+        t.enabled = true;
+      });
 
       if (cameraFallback) {
         setIsCameraOn(false);
@@ -971,7 +1069,7 @@ export const SimpleVideoView: React.FC = () => {
               <div className="border border-slate-200 rounded-xl p-3 space-y-2.5 bg-slate-50">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-semibold text-slate-700">
-                    Select team members for this call
+                    Select added contacts for this call
                   </span>
                   <button
                     type="button"
@@ -979,17 +1077,17 @@ export const SimpleVideoView: React.FC = () => {
                     className="text-sky-600 hover:text-sky-700 font-semibold flex items-center gap-1"
                   >
                     <UserPlus className="w-3.5 h-3.5" />
-                    <span>Invite New Member</span>
+                    <span>Add User</span>
                   </button>
                 </div>
-                {teamUsers.filter((u) => u.uid !== firebaseUser?.uid).length === 0 ? (
+                {addedTeammates.length === 0 ? (
                   <p className="text-xs text-slate-500">
-                    No other teammates signed up yet. Click Invite New Member to add someone.
+                    No contacts added yet. Click Add User to find someone by @username or name.
                   </p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-40 overflow-y-auto">
                     {sortUsersByPresence(
-                      teamUsers.filter((u) => u.uid !== firebaseUser?.uid),
+                      addedTeammates,
                       firebaseUser?.uid,
                       presenceNow
                     ).map((u) => {
@@ -1018,6 +1116,11 @@ export const SimpleVideoView: React.FC = () => {
                         >
                           <div className="min-w-0 flex items-center gap-2">
                             <span className="font-medium truncate">{u.displayName}</span>
+                            {u.username && (
+                              <span className="text-[10px] font-mono text-slate-400 truncate">
+                                @{u.username}
+                              </span>
+                            )}
                             <UserStatusBadge status={effectiveStatus} compact />
                           </div>
                           {checked && <Check className="w-3.5 h-3.5 text-sky-600 shrink-0" />}
@@ -1258,11 +1361,27 @@ export const SimpleVideoView: React.FC = () => {
                 <RemoteParticipantTile
                   key={u!.uid}
                   displayName={u!.displayName}
+                  username={u!.username}
                   avatar={u!.avatar}
                   stream={remoteStreams[u!.uid]}
+                  audioUnlockTick={audioUnlockTick}
+                  onAudioBlocked={(blocked) => {
+                    if (blocked) setRemoteAudioBlocked(true);
+                  }}
                 />
               ))}
           </div>
+        )}
+
+        {remoteAudioBlocked && (
+          <button
+            type="button"
+            onClick={unlockRemoteAudio}
+            className="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold flex items-center gap-2 shadow-lg animate-pulse"
+          >
+            <Volume2 className="w-4 h-4" />
+            <span>Tap to Enable Call Audio</span>
+          </button>
         )}
 
         {/* Live Captions */}
@@ -1391,14 +1510,14 @@ export const SimpleVideoView: React.FC = () => {
             </div>
 
             <div className="p-5 space-y-3 max-h-72 overflow-y-auto">
-              {teamUsers.filter((u) => u.uid !== firebaseUser?.uid).length === 0 ? (
+              {addedTeammates.length === 0 ? (
                 <p className="text-xs text-slate-500 py-2">
-                  No other teammates have signed up yet. Invite a member below.
+                  No contacts added yet. Click Add User below to find someone by @username or name.
                 </p>
               ) : (
                 <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl">
                   {sortUsersByPresence(
-                    teamUsers.filter((u) => u.uid !== firebaseUser?.uid),
+                    addedTeammates,
                     firebaseUser?.uid,
                     presenceNow
                   ).map((u) => {
@@ -1425,6 +1544,11 @@ export const SimpleVideoView: React.FC = () => {
                           <span className="text-xs font-semibold text-slate-900 truncate">
                             {u.displayName}
                           </span>
+                          {u.username && (
+                            <span className="text-[11px] font-mono text-sky-700 truncate">
+                              @{u.username}
+                            </span>
+                          )}
                           <UserStatusBadge status={effectiveStatus} compact />
                         </div>
                         <div

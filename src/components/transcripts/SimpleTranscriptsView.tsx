@@ -21,6 +21,8 @@ import {
 import { useApp } from '../../context/AppContext';
 import { MeetingRecord, MeetingTask } from '../../types';
 import {
+  downloadMeetingMinutesMarkdown,
+  downloadMeetingMinutesPdf,
   downloadTranscriptText,
   formatTranscriptAsText,
   pickSupportedAudioMimeType,
@@ -402,6 +404,14 @@ export const SimpleTranscriptsView: React.FC = () => {
     downloadTranscriptText(m);
   };
 
+  const handleDownloadMarkdown = (m: MeetingRecord) => {
+    downloadMeetingMinutesMarkdown(m);
+  };
+
+  const handleDownloadPdf = (m: MeetingRecord) => {
+    downloadMeetingMinutesPdf(m);
+  };
+
   const handleShareMomToChat = async (m: MeetingRecord) => {
     if (sharingToChat) return;
     setSharingToChat(true);
@@ -707,16 +717,34 @@ export const SimpleTranscriptsView: React.FC = () => {
                     <div className="p-3.5 rounded-xl bg-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-2">
                       <div className="flex items-center gap-2 text-xs font-semibold text-emerald-900">
                         <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                        <span>AI Meeting Minutes (MoM) generated and ready to download!</span>
+                        <span>AI Meeting Minutes (MoM) generated and ready to export!</span>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => handleDownloadTxt(activeDetail)}
-                        className="min-h-[36px] px-3 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5"
-                      >
-                        <Download className="w-3.5 h-3.5" />
-                        <span>Download (.txt)</span>
-                      </button>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadPdf(activeDetail)}
+                          className="min-h-[34px] px-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>PDF</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadMarkdown(activeDetail)}
+                          className="min-h-[34px] px-2.5 rounded-lg bg-white border border-emerald-300 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold flex items-center gap-1"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>Markdown</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadTxt(activeDetail)}
+                          className="min-h-[34px] px-2.5 rounded-lg bg-white border border-emerald-300 hover:bg-emerald-100 text-emerald-800 text-xs font-semibold flex items-center gap-1"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          <span>.txt</span>
+                        </button>
+                      </div>
                     </div>
                   )}
 
@@ -774,11 +802,32 @@ export const SimpleTranscriptsView: React.FC = () => {
 
                       <button
                         type="button"
-                        onClick={() => handleDownloadTxt(activeDetail)}
+                        onClick={() => handleDownloadPdf(activeDetail)}
                         className="min-h-[38px] px-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-1.5"
+                        title="Export Meeting Minutes as PDF"
                       >
                         <Download className="w-3.5 h-3.5" />
-                        <span>Download (.txt)</span>
+                        <span>Export PDF</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadMarkdown(activeDetail)}
+                        className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
+                        title="Export Meeting Minutes as Markdown (.md)"
+                      >
+                        <Download className="w-3.5 h-3.5 text-sky-600" />
+                        <span>Markdown (.md)</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadTxt(activeDetail)}
+                        className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
+                        title="Download Meeting Minutes as Plain Text (.txt)"
+                      >
+                        <Download className="w-3.5 h-3.5" />
+                        <span>Text (.txt)</span>
                       </button>
 
                       {(activeDetail.organizerId === firebaseUser?.uid ||
