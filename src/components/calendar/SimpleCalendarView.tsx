@@ -19,9 +19,13 @@ import {
   BellRing,
   Globe,
   AlertTriangle,
+  Search,
+  Loader2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useMeetingNotifications } from '../../context/NotificationContext';
+import { useEmailSearchMatch } from '../../hooks/useEmailSearchMatch';
+import { matchesUserSearch } from '../../utils/userLookup';
 import { MeetingRecord } from '../../types';
 import {
   CALENDAR_TIME_SLOTS,
@@ -45,11 +49,15 @@ export const SimpleCalendarView: React.FC = () => {
   const {
     firebaseUser,
     teamUsers,
-    contacts,
+    conversations,
     meetings,
     presenceNow,
     selectedTimezone,
     setSelectedTimezone,
+    meetingDraft,
+    clearMeetingDraft,
+    addContact,
+    isAddedMember,
     scheduleMeeting,
     rescheduleMeeting,
     shareScheduledMeetingToChat,
@@ -96,16 +104,31 @@ export const SimpleCalendarView: React.FC = () => {
   const [meetingTitle, setMeetingTitle] = useState<string>('');
   const [meetingMode, setMeetingMode] = useState<'video' | 'voice'>('video');
   const [selectedParticipantIds, setSelectedParticipantIds] = useState<string[]>([]);
+  const [participantSearch, setParticipantSearch] = useState<string>('');
   const [editingMeetingId, setEditingMeetingId] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [lastScheduled, setLastScheduled] = useState<MeetingRecord | null>(null);
   const [sharedMeetingId, setSharedMeetingId] = useState<string | null>(null);
   const [sharingId, setSharingId] = useState<string | null>(null);
+  const [addingUid, setAddingUid] = useState<string | null>(null);
   const [addMemberOpen, setAddMemberOpen] = useState<boolean>(false);
   const [timeConflictModal, setTimeConflictModal] = useState<{
     title: string;
     whenText: string;
   } | null>(null);
+
+  React.useEffect(() => {
+    if (!meetingDraft) return;
+    setEditingMeetingId(null);
+    if (meetingDraft.title) setMeetingTitle(meetingDraft.title);
+    if (meetingDraft.mode) setMeetingMode(meetingDraft.mode);
+    if (Array.isArray(meetingDraft.participantIds)) {
+      setSelectedParticipantIds(
+        meetingDraft.participantIds.filter((id) => id && id !== firebaseUser?.uid)
+      );
+    }
+    clearMeetingDraft();
+  }, [meetingDraft, firebaseUser?.uid, clearMeetingDraft]);
 
   const calendarDays = useMemo(
     () => getMonthCalendarDays(viewMonth.getFullYear(), viewMonth.getMonth()),
@@ -172,16 +195,33 @@ export const SimpleCalendarView: React.FC = () => {
     [scheduledEvents]
   );
 
-  const addedUidSet = useMemo(() => new Set(contacts.map((c) => c.uid)), [contacts]);
-
   const otherTeammates = useMemo(
     () =>
       sortUsersByPresence(
-        teamUsers.filter((u) => u.uid !== firebaseUser?.uid && addedUidSet.has(u.uid)),
+        teamUsers.filter((u) => u.uid !== firebaseUser?.uid),
         firebaseUser?.uid,
         presenceNow
       ),
-    [teamUsers, firebaseUser?.uid, addedUidSet, presenceNow]
+    [teamUsers, firebaseUser?.uid, presenceNow]
+  );
+
+  const { matchedEmailUser, searchingEmail, searchedEmail } =
+    useEmailSearchMatch(participantSearch);
+
+  const filteredTeammates = useMemo(
+    () =>
+      otherTeammates.filter((u) =>
+        matchesUserSearch(u, participantSearch, matchedEmailUser?.uid)
+      ),
+    [otherTeammates, participantSearch, matchedEmailUser?.uid]
+  );
+
+  const selectableGroups = useMemo(
+    () =>
+      conversations.filter(
+        (c) => c.type === 'channel' && !c.isPublic && c.participantIds.length > 1
+      ),
+    [conversations]
   );
 
   const filteredTimeSlots = useMemo(() => {
@@ -236,6 +276,10 @@ export const SimpleCalendarView: React.FC = () => {
   };
 
   const toggleParticipant = (uid: string) => {
+    if (!selectedParticipantIds.includes(uid) && !isAddedMember(uid)) {
+      setErrorBanner('Please add this user as a member first before inviting them to a meeting.');
+      return;
+    }
     setSelectedParticipantIds((prev) =>
       prev.includes(uid) ? prev.filter((id) => id !== uid) : [...prev, uid]
     );
@@ -344,32 +388,32 @@ export const SimpleCalendarView: React.FC = () => {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50 p-4 sm:p-6">
-      <div className="max-w-6xl mx-auto space-y-5">
+    <div className="flex-1 overflow-y-auto bg-slate-50 p-3.5 sm:p-6">
+      <div className="max-w-6xl mx-auto space-y-4 sm:space-y-5">
         {/* Header Bar */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          <div className="flex items-center gap-3 min-w-0">
             <div className="w-10 h-10 rounded-xl bg-sky-50 border border-sky-200 text-sky-600 flex items-center justify-center shrink-0">
               <CalendarIcon className="w-5 h-5" />
             </div>
-            <div>
-              <h1 className="text-lg sm:text-xl font-bold text-slate-900">
+            <div className="min-w-0">
+              <h1 className="text-base sm:text-xl font-bold text-slate-900 truncate">
                 Meeting Calendar &amp; Scheduler
               </h1>
               <p className="text-xs text-slate-500">
-                24-hour AM &amp; PM scheduling · Now in <span className="font-semibold text-slate-700">{selectedTzShort}</span>: {currentTimeInZone}
+                24-hour AM &amp; PM · <span className="font-semibold text-slate-700">{selectedTzShort}</span>: {currentTimeInZone}
               </p>
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <div className="flex items-center gap-1.5 px-2.5 min-h-[38px] rounded-xl border border-slate-200 bg-slate-50">
+          <div className="flex flex-wrap items-center gap-2 w-full lg:w-auto">
+            <div className="flex items-center gap-1.5 px-2.5 min-h-[40px] sm:min-h-[38px] rounded-xl border border-slate-200 bg-slate-50 w-full sm:w-auto min-w-0">
               <Globe className="w-3.5 h-3.5 text-sky-600 shrink-0" />
               <select
                 value={selectedTimezone}
                 onChange={(e) => setSelectedTimezone(e.target.value)}
                 aria-label="Select calendar time zone"
-                className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none max-w-[200px]"
+                className="bg-transparent text-xs font-semibold text-slate-800 focus:outline-none w-full sm:max-w-[200px] truncate"
               >
                 {timeZones.map((tz) => (
                   <option key={tz.value} value={tz.value}>
@@ -387,11 +431,11 @@ export const SimpleCalendarView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => requestNotificationPermission()}
-                className="min-h-[38px] px-3 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+                className="min-h-[40px] sm:min-h-[38px] px-3 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 text-xs font-semibold flex items-center gap-1.5 transition-colors"
                 title="Allow browser push alerts 5 minutes before meetings"
               >
                 <Bell className="w-3.5 h-3.5" />
-                <span>Enable 5-Min Push Alerts</span>
+                <span>Enable 5-Min Alerts</span>
               </button>
             )}
 
@@ -399,7 +443,7 @@ export const SimpleCalendarView: React.FC = () => {
               <button
                 type="button"
                 onClick={toggleRemindersEnabled}
-                className={`min-h-[38px] px-3 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors ${
+                className={`min-h-[40px] sm:min-h-[38px] px-3 rounded-xl border text-xs font-semibold flex items-center gap-1.5 transition-colors ${
                   remindersEnabled
                     ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
                     : 'bg-slate-50 border-slate-200 text-slate-600'
@@ -414,7 +458,7 @@ export const SimpleCalendarView: React.FC = () => {
             <button
               type="button"
               onClick={() => sendTestReminder()}
-              className="min-h-[38px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors"
+              className="min-h-[40px] sm:min-h-[38px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors"
               title="Preview the 5-minute meeting notification alert"
             >
               <Bell className="w-3.5 h-3.5 text-sky-600" />
@@ -426,7 +470,7 @@ export const SimpleCalendarView: React.FC = () => {
               onClick={() => {
                 resetForm(false);
               }}
-              className="min-h-[38px] px-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors"
+              className="min-h-[40px] sm:min-h-[38px] px-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors"
             >
               <Plus className="w-4 h-4" />
               <span>Today</span>
@@ -438,7 +482,7 @@ export const SimpleCalendarView: React.FC = () => {
           {/* Left Column: Monthly Calendar + Selected Day Schedule + Upcoming List */}
           <div className="lg:col-span-7 space-y-5">
             {/* Monthly Calendar Card */}
-            <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4">
+            <div className="bg-white border border-slate-200 rounded-2xl p-3 sm:p-5 space-y-3 sm:space-y-4">
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-base font-bold text-slate-900">{monthLabel}</h2>
                 <div className="flex items-center gap-1.5">
@@ -481,7 +525,7 @@ export const SimpleCalendarView: React.FC = () => {
                 {WEEKDAYS.map((day) => (
                   <div
                     key={day}
-                    className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide py-1"
+                    className="text-[10px] sm:text-[11px] font-semibold text-slate-400 uppercase tracking-wide py-1"
                   >
                     {day}
                   </div>
@@ -489,7 +533,7 @@ export const SimpleCalendarView: React.FC = () => {
               </div>
 
               {/* 42-Cell Calendar Grid */}
-              <div className="grid grid-cols-7 gap-1.5">
+              <div className="grid grid-cols-7 gap-1 sm:gap-1.5">
                 {calendarDays.map((cell) => {
                   const dayEvents = eventsByDate.get(cell.dateKey) || [];
                   const isToday = cell.dateKey === todayKey;
@@ -501,7 +545,7 @@ export const SimpleCalendarView: React.FC = () => {
                       key={cell.dateKey}
                       type="button"
                       onClick={() => selectDateAndSyncMonth(cell.dateKey)}
-                      className={`min-h-[68px] sm:min-h-[82px] p-1.5 rounded-xl border text-left flex flex-col justify-between transition-all ${
+                      className={`min-h-[50px] sm:min-h-[82px] p-1 sm:p-1.5 rounded-lg sm:rounded-xl border text-left flex flex-col justify-between transition-all ${
                         isSelected
                           ? 'border-sky-600 bg-sky-50/80 ring-2 ring-sky-200'
                           : isToday
@@ -511,9 +555,9 @@ export const SimpleCalendarView: React.FC = () => {
                               : 'border-slate-100 bg-slate-50/60 text-slate-400 hover:bg-slate-100/70'
                       }`}
                     >
-                      <div className="flex items-center justify-between gap-1 w-full">
+                      <div className="flex items-center justify-center sm:justify-between gap-1 w-full">
                         <span
-                          className={`text-xs font-semibold tabular-nums w-6 h-6 rounded-full flex items-center justify-center ${
+                          className={`text-[11px] sm:text-xs font-semibold tabular-nums w-5 h-5 sm:w-6 sm:h-6 rounded-full flex items-center justify-center ${
                             isToday
                               ? 'bg-sky-600 text-white'
                               : isSelected
@@ -528,13 +572,32 @@ export const SimpleCalendarView: React.FC = () => {
                           {cell.date.getDate()}
                         </span>
                         {dayEvents.length > 0 && (
-                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 tabular-nums">
+                          <span className="hidden sm:inline-block text-[10px] font-bold px-1.5 py-0.5 rounded bg-sky-100 text-sky-700 tabular-nums">
                             {dayEvents.length}
                           </span>
                         )}
                       </div>
 
-                      <div className="space-y-0.5 w-full overflow-hidden">
+                      {/* Mobile indicator dots */}
+                      {dayEvents.length > 0 && (
+                        <div className="flex sm:hidden items-center justify-center gap-0.5 mt-0.5">
+                          {dayEvents.slice(0, 3).map((ev) => (
+                            <span
+                              key={ev.meeting.id}
+                              className={`w-1.5 h-1.5 rounded-full ${
+                                ev.meeting.status === 'live'
+                                  ? 'bg-rose-500'
+                                  : ev.isVoice
+                                    ? 'bg-emerald-500'
+                                    : 'bg-sky-600'
+                              }`}
+                            />
+                          ))}
+                        </div>
+                      )}
+
+                      {/* Desktop event previews */}
+                      <div className="hidden sm:block space-y-0.5 w-full overflow-hidden">
                         {dayEvents.slice(0, 2).map((ev) => (
                           <div
                             key={ev.meeting.id}
@@ -701,7 +764,7 @@ export const SimpleCalendarView: React.FC = () => {
                     <div
                       key={meeting.id}
                       onClick={() => selectDateAndSyncMonth(parsed.dateKey)}
-                      className={`p-3 rounded-xl border cursor-pointer flex items-center justify-between gap-3 transition-colors ${
+                      className={`p-3 rounded-xl border cursor-pointer flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3 transition-colors ${
                         parsed.dateKey === selectedDate
                           ? 'border-sky-300 bg-sky-50/50'
                           : 'border-slate-200 hover:bg-slate-50'
@@ -714,7 +777,7 @@ export const SimpleCalendarView: React.FC = () => {
                         <div className="text-sm font-semibold text-slate-900 truncate">
                           {meeting.title}
                         </div>
-                        <div className="text-[11px] text-slate-500">
+                        <div className="text-[11px] text-slate-500 truncate">
                           {isVoice ? 'Voice Call' : 'Video Meeting'} · {meeting.organizerName}
                         </div>
                       </div>
@@ -724,7 +787,7 @@ export const SimpleCalendarView: React.FC = () => {
                           e.stopPropagation();
                           joinVideoCall(meeting, isVoice ? 'voice' : 'video');
                         }}
-                        className="min-h-[34px] px-3 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shrink-0"
+                        className="min-h-[38px] sm:min-h-[34px] px-3 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shrink-0 w-full sm:w-auto"
                       >
                         Start
                       </button>
@@ -739,7 +802,7 @@ export const SimpleCalendarView: React.FC = () => {
           <div className="lg:col-span-5">
             <form
               onSubmit={handleScheduleSubmit}
-              className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4 sticky top-4"
+              className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-5 space-y-4 lg:sticky lg:top-4"
             >
               <div className="flex items-center justify-between gap-2">
                 <div>
@@ -864,7 +927,7 @@ export const SimpleCalendarView: React.FC = () => {
               </div>
 
               {/* Exact Date & Custom 24-Hour Time Inputs */}
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="space-y-1.5">
                   <label className="block text-xs font-semibold text-slate-700">
                     Date
@@ -938,7 +1001,7 @@ export const SimpleCalendarView: React.FC = () => {
                     • Amber slots already have a scheduled meeting on this date
                   </div>
                 )}
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-52 overflow-y-auto pr-1">
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 max-h-52 overflow-y-auto pr-1">
                   {filteredTimeSlots.map((slot) => {
                     const active = selectedTime === slot;
                     const booked = bookedTimesOnSelectedDate.has(slot);
@@ -975,35 +1038,140 @@ export const SimpleCalendarView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Invite Added Contacts */}
+              {/* Invite People or Group */}
               <div className="space-y-2 pt-1 border-t border-slate-100">
                 <div className="flex items-center justify-between text-xs">
                   <span className="font-semibold text-slate-700">
-                    Invite Contacts ({selectedParticipantIds.length === 0 ? 'Private / Open' : `${selectedParticipantIds.length} selected`})
+                    Invite People ({selectedParticipantIds.length === 0 ? 'Open to team' : `${selectedParticipantIds.length} selected`})
                   </span>
-                  <button
-                    type="button"
-                    onClick={() => setAddMemberOpen(true)}
-                    className="text-sky-600 hover:text-sky-700 font-semibold flex items-center gap-1"
-                  >
-                    <UserPlus className="w-3.5 h-3.5" />
-                    <span>Add User</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {selectedParticipantIds.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => setSelectedParticipantIds([])}
+                        className="text-slate-500 hover:text-slate-700 font-semibold"
+                      >
+                        Clear
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setAddMemberOpen(true)}
+                      className="text-sky-600 hover:text-sky-700 font-semibold flex items-center gap-1"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Invite</span>
+                    </button>
+                  </div>
                 </div>
+
+                {selectableGroups.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span className="text-[11px] text-slate-500 font-medium">From group:</span>
+                    {selectableGroups.map((grp) => (
+                      <button
+                        key={grp.id}
+                        type="button"
+                        onClick={() => {
+                          const members = grp.participantIds.filter(
+                            (id) => id !== firebaseUser?.uid && isAddedMember(id)
+                          );
+                          setSelectedParticipantIds(members);
+                          if (!meetingTitle.trim()) {
+                            setMeetingTitle(`${grp.name} Meeting`);
+                          }
+                        }}
+                        className="px-2 py-0.5 rounded-lg border border-slate-200 bg-slate-50 hover:border-sky-400 hover:bg-sky-50 text-[11px] font-semibold text-slate-700 transition-colors"
+                      >
+                        {grp.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {otherTeammates.length > 0 && (
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      value={participantSearch}
+                      onChange={(e) => setParticipantSearch(e.target.value)}
+                      placeholder="Find by name, @username, or @email..."
+                      className="w-full min-h-[36px] bg-slate-50 border border-slate-200 rounded-lg pl-8 pr-8 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
+                    />
+                    {searchingEmail && (
+                      <Loader2 className="w-3.5 h-3.5 text-sky-600 animate-spin absolute right-3 top-2.5" />
+                    )}
+                  </div>
+                )}
 
                 {otherTeammates.length === 0 ? (
                   <p className="text-[11px] text-slate-500">
-                    No contacts added yet. Search and add a user by @username to invite them directly.
+                    No other users have signed up yet. Invite someone by email to add them directly.
+                  </p>
+                ) : filteredTeammates.length === 0 ? (
+                  <p className="text-[11px] text-slate-500">
+                    {searchingEmail
+                      ? 'Searching by email...'
+                      : searchedEmail
+                      ? `No registered user found for ${searchedEmail}.`
+                      : `No users match "${participantSearch}".`}
                   </p>
                 ) : (
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-36 overflow-y-auto pr-1">
-                    {otherTeammates.map((user) => {
+                    {filteredTeammates.map((user) => {
                       const checked = selectedParticipantIds.includes(user.uid);
+                      const memberAdded = isAddedMember(user.uid);
+                      const isAdding = addingUid === user.uid;
                       const effectiveStatus = getEffectiveUserStatus(
                         user,
                         firebaseUser?.uid,
                         presenceNow
                       );
+
+                      if (!checked && !memberAdded) {
+                        return (
+                          <div
+                            key={user.uid}
+                            className="min-h-[42px] px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white text-left flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-1.5">
+                                <span className="font-medium truncate text-slate-800">
+                                  {user.displayName}
+                                </span>
+                                <UserStatusBadge status={effectiveStatus} compact />
+                              </div>
+                              {user.username && (
+                                <div className="text-[10px] text-slate-500 truncate">
+                                  @{user.username}
+                                </div>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              disabled={isAdding}
+                              onClick={async () => {
+                                setAddingUid(user.uid);
+                                try {
+                                  await addContact(user.uid);
+                                } finally {
+                                  setAddingUid(null);
+                                }
+                              }}
+                              className="px-2 py-1 rounded-md bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-[10px] font-semibold flex items-center gap-1 shrink-0"
+                            >
+                              {isAdding ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <UserPlus className="w-3 h-3" />
+                              )}
+                              <span>Add</span>
+                            </button>
+                          </div>
+                        );
+                      }
+
                       return (
                         <button
                           key={user.uid}
@@ -1058,12 +1226,12 @@ export const SimpleCalendarView: React.FC = () => {
       {/* Duplicate Time Conflict Popup Modal */}
       {timeConflictModal && (
         <div
-          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4"
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4"
           role="alertdialog"
           aria-modal="true"
           aria-labelledby="conflict-modal-title"
         >
-          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-xl">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-sm p-5 sm:p-6 space-y-4 shadow-xl">
             <div className="flex items-start gap-3">
               <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center shrink-0">
                 <AlertTriangle className="w-5 h-5" />

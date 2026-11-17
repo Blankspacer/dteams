@@ -432,6 +432,38 @@
         }
       },
       "required": ["uid", "addedByUid", "displayName", "createdAt"]
+    },
+    "EmailLookup": {
+      "title": "Email Lookup Index",
+      "description": "Privacy-preserving SHA-256 email hash index allowing verified users to look up teammates by exact email without exposing raw email PII.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "username": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 30,
+          "pattern": "^[a-z0-9_.-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "displayName", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -450,6 +482,10 @@
     "/users/{userId}/contacts/{contactId}": {
       "schema": { "$ref": "#/entities/UserContact" },
       "description": "Teammates added by the user to their personal chat contacts list."
+    },
+    "/email_lookup/{emailHash}": {
+      "schema": { "$ref": "#/entities/EmailLookup" },
+      "description": "Exact-match SHA-256 email lookup index (no raw email stored; list disabled)."
     },
     "/conversations/{conversationId}": {
       "schema": { "$ref": "#/entities/Conversation" },

@@ -55,6 +55,11 @@ import {
   isValidUsername,
   normalizeUsername,
 } from '../utils/username';
+import {
+  hashEmailForLookup,
+  isEmailLookupQuery,
+  normalizeSearchToken,
+} from '../utils/userLookup';
 
 interface AppContextType {
   firebaseUser: FirebaseUser | null;
@@ -62,7 +67,7 @@ interface AppContextType {
   currentProfile: UserProfile | null;
   teamUsers: UserProfile[];
   contacts: UserContact[];
-  isFirstLogin: boolean;
+  addedMemberIds: string[];
   teamInvites: TeamInvite[];
   conversations: Conversation[];
   activeConversationId: string;
@@ -76,6 +81,8 @@ interface AppContextType {
   presenceNow: number;
   lastTranscribedMeetingId: string | null;
   selectedTimezone: string;
+  meetingDraft: { title?: string; participantIds?: string[]; mode?: 'voice' | 'video' } | null;
+  createGroupModalOpen: boolean;
 
   setActiveTab: (tab: AppTab) => void;
   setActiveCallMode: (mode: 'voice' | 'video') => void;
@@ -83,7 +90,16 @@ interface AppContextType {
   setErrorBanner: (msg: string | null) => void;
   setLastTranscribedMeetingId: (id: string | null) => void;
   setSelectedTimezone: (tz: string) => Promise<void>;
-  dismissFirstLoginPrompt: () => void;
+  openMeetingSchedulerWithDraft: (draft: {
+    title?: string;
+    participantIds?: string[];
+    mode?: 'voice' | 'video';
+  }) => void;
+  clearMeetingDraft: () => void;
+  openCreateGroupModal: () => void;
+  closeCreateGroupModal: () => void;
+  lookupUserByEmail: (rawQuery: string) => Promise<UserProfile | null>;
+  isAddedMember: (uid: string) => boolean;
   refreshAuthUser: () => Promise<boolean>;
   signOut: () => Promise<void>;
 
@@ -195,7 +211,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [currentProfile, setCurrentProfile] = useState<UserProfile | null>(null);
   const [teamUsers, setTeamUsers] = useState<UserProfile[]>([]);
   const [contacts, setContacts] = useState<UserContact[]>([]);
-  const [isFirstLogin, setIsFirstLogin] = useState(false);
   const [teamInvites, setTeamInvites] = useState<TeamInvite[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<string>('');
@@ -210,6 +225,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [presenceNow, setPresenceNow] = useState(() => Date.now());
   const [lastTranscribedMeetingId, setLastTranscribedMeetingId] = useState<string | null>(null);
   const [selectedTimezone, setSelectedTimezoneState] = useState<string>(() => getSavedTimeZone());
+  const [meetingDraft, setMeetingDraft] = useState<{
+    title?: string;
+    participantIds?: string[];
+    mode?: 'voice' | 'video';
+  } | null>(null);
+  const [createGroupModalOpen, setCreateGroupModalOpen] = useState(false);
+  const emailLookupCacheRef = useRef<Map<string, { uid: string | null; checkedAt: number }>>(new Map());
   const manualStatusRef = useRef<UserStatus | null>(null);
   const preCallStatusRef = useRef<UserStatus>('online');
   const wasInCallRef = useRef<boolean>(false);
@@ -225,6 +247,29 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     activeMeetingRef.current = activeMeeting;
   }, [activeMeeting]);
 
+  const addedMemberIds = React.useMemo(() => contacts.map((c) => c.uid), [contacts]);
+
+  const isAddedMember = (uid: string): boolean => {
+    if (!uid) return false;
+    if (firebaseUser && uid === firebaseUser.uid) return true;
+    return contacts.some((c) => c.uid === uid);
+  };
+
+  const findUnaddedTargetIds = (
+    uids: string[] = [],
+    allowedExistingIds: string[] = []
+  ): string[] => {
+    if (!firebaseUser) return [];
+    const allowedSet = new Set(allowedExistingIds);
+    return Array.from(new Set(uids)).filter(
+      (uid) =>
+        uid &&
+        uid !== firebaseUser.uid &&
+        !allowedSet.has(uid) &&
+        !contacts.some((c) => c.uid === uid)
+    );
+  };
+
   // 1. Auth State Listener
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
@@ -234,7 +279,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setCurrentProfile(null);
         setTeamUsers([]);
         setContacts([]);
-        setIsFirstLogin(false);
         setTeamInvites([]);
         setConversations([]);
         setMessages([]);
@@ -243,6 +287,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setActiveCallMode('video');
         setDismissedCallIds([]);
         setActiveConversationId('');
+        setMeetingDraft(null);
+        setCreateGroupModalOpen(false);
+        emailLookupCacheRef.current.clear();
       }
     });
     return () => unsub();
@@ -257,22 +304,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     async function ensureUserAndDefaults() {
       const userPath = `users/${uid}`;
+      let resolvedDisplayName =
+        firebaseUser!.displayName?.trim() ||
+        firebaseUser!.email?.split('@')[0] ||
+        'Team Member';
+      let resolvedUsername = '';
       try {
         const userSnap = await getDoc(doc(db, 'users', uid));
         if (!userSnap.exists()) {
-          const displayName =
-            firebaseUser!.displayName?.trim() ||
-            firebaseUser!.email?.split('@')[0] ||
-            'Team Member';
           const pendingHandle = consumePendingSignupUsername(firebaseUser!.email);
           const initialUsername =
             pendingHandle ||
-            deriveDefaultUsername(firebaseUser!.email || displayName, uid);
+            deriveDefaultUsername(firebaseUser!.email || resolvedDisplayName, uid);
           const initialTimezone = getSavedTimeZone();
+          resolvedUsername = initialUsername;
 
           const profilePayload = {
             uid,
-            displayName: displayName.slice(0, 80),
+            displayName: resolvedDisplayName.slice(0, 80),
             username: initialUsername,
             timezone: initialTimezone.slice(0, 64),
             title: isBootstrappedAdmin ? 'Team Lead' : 'Team Member',
@@ -288,39 +337,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
 
           await setDoc(doc(db, 'users', uid), profilePayload);
-          try {
-            localStorage.setItem(`spherecall_needs_onboarding_${uid}`, '1');
-          } catch {
-            // Ignore storage error
-          }
-          setIsFirstLogin(true);
         } else {
           const existingData = userSnap.data() || {};
+          resolvedDisplayName = (existingData.displayName as string) || resolvedDisplayName;
           const existingStatus = (existingData.status || 'offline') as UserStatus;
           const updates: Record<string, unknown> = {
             status: existingStatus === 'offline' || existingStatus === 'away' ? 'online' : existingStatus,
             updatedAt: serverTimestamp(),
           };
           if (!existingData.username) {
-            updates.username =
+            const generatedUsername =
               consumePendingSignupUsername(firebaseUser!.email) ||
               deriveDefaultUsername(
                 firebaseUser!.email || existingData.displayName || 'user',
                 uid
               );
+            updates.username = generatedUsername;
+            resolvedUsername = generatedUsername;
+          } else {
+            resolvedUsername = String(existingData.username);
           }
           if (typeof existingData.timezone === 'string' && isValidTimeZone(existingData.timezone)) {
             setSavedTimeZone(existingData.timezone);
             setSelectedTimezoneState(existingData.timezone);
           }
           await updateDoc(doc(db, 'users', uid), updates);
-          try {
-            if (localStorage.getItem(`spherecall_needs_onboarding_${uid}`) === '1') {
-              setIsFirstLogin(true);
-            }
-          } catch {
-            // Ignore storage error
-          }
         }
       } catch (error) {
         handleFirestoreError(error, OperationType.WRITE, userPath);
@@ -340,6 +381,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }
       } catch (error) {
         handleFirestoreError(error, OperationType.WRITE, privatePath);
+      }
+
+      if (firebaseUser!.email) {
+        const emailHash = await hashEmailForLookup(firebaseUser!.email);
+        const lookupPath = `email_lookup/${emailHash}`;
+        try {
+          const lookupRef = doc(db, 'email_lookup', emailHash);
+          const lookupSnap = await getDoc(lookupRef);
+          const validHandle = isValidUsername(resolvedUsername) ? resolvedUsername : undefined;
+          if (!lookupSnap.exists()) {
+            await setDoc(lookupRef, {
+              uid,
+              displayName: resolvedDisplayName.slice(0, 80),
+              ...(validHandle ? { username: validHandle } : {}),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          } else if (lookupSnap.data()?.uid === uid) {
+            await updateDoc(lookupRef, {
+              displayName: resolvedDisplayName.slice(0, 80),
+              ...(validHandle ? { username: validHandle } : {}),
+              updatedAt: serverTimestamp(),
+            });
+          }
+        } catch (error) {
+          handleFirestoreError(error, OperationType.WRITE, lookupPath);
+        }
       }
 
       const generalPath = 'conversations/general';
@@ -815,6 +883,46 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         ...sanitizedUpdates,
         updatedAt: serverTimestamp(),
       });
+      if (
+        firebaseUser.email &&
+        (typeof sanitizedUpdates.displayName === 'string' ||
+          typeof sanitizedUpdates.username === 'string')
+      ) {
+        try {
+          const emailHash = await hashEmailForLookup(firebaseUser.email);
+          const lookupRef = doc(db, 'email_lookup', emailHash);
+          const lookupSnap = await getDoc(lookupRef);
+          const nextName = (
+            (sanitizedUpdates.displayName as string) ||
+            currentProfile?.displayName ||
+            firebaseUser.displayName ||
+            'Member'
+          ).slice(0, 80);
+          const nextUsername =
+            (sanitizedUpdates.username as string) || currentProfile?.username;
+          const validHandle =
+            typeof nextUsername === 'string' && isValidUsername(nextUsername)
+              ? nextUsername
+              : undefined;
+          if (lookupSnap.exists() && lookupSnap.data()?.uid === firebaseUser.uid) {
+            await updateDoc(lookupRef, {
+              displayName: nextName,
+              ...(validHandle ? { username: validHandle } : {}),
+              updatedAt: serverTimestamp(),
+            });
+          } else if (!lookupSnap.exists()) {
+            await setDoc(lookupRef, {
+              uid: firebaseUser.uid,
+              displayName: nextName,
+              ...(validHandle ? { username: validHandle } : {}),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
+        } catch {
+          // Non-fatal; directory profile is already updated
+        }
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, path);
     }
@@ -856,6 +964,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     options?: { memberIds?: string[]; isPublic?: boolean }
   ): Promise<string> => {
     if (!firebaseUser) return '';
+    const unadded = findUnaddedTargetIds(options?.memberIds || []);
+    if (unadded.length > 0) {
+      throw new Error('Please add users as members first before adding them to a group.');
+    }
+
     const cleanName = name.trim().replace(/^#/, '').slice(0, 100);
     if (!cleanName) return '';
     const convId = `grp-${Date.now().toString(36)}`;
@@ -892,6 +1005,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!firebaseUser) return;
     const conv = conversations.find((c) => c.id === conversationId);
     if (!conv) return;
+
+    const unadded = findUnaddedTargetIds(memberIds, conv.participantIds || []);
+    if (unadded.length > 0) {
+      throw new Error('Please add users as members first before adding them to a group.');
+    }
 
     const isAdminUser =
       currentProfile?.role === 'admin' || firebaseUser.email === 'sneloy@gmail.com';
@@ -939,22 +1057,84 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
-  const dismissFirstLoginPrompt = () => {
-    if (firebaseUser) {
-      try {
-        localStorage.removeItem(`spherecall_needs_onboarding_${firebaseUser.uid}`);
-      } catch {
-        // Ignore storage error
+  const openMeetingSchedulerWithDraft = (draft: {
+    title?: string;
+    participantIds?: string[];
+    mode?: 'voice' | 'video';
+  }) => {
+    setMeetingDraft(draft);
+    setActiveTab('calendar');
+  };
+
+  const clearMeetingDraft = () => {
+    setMeetingDraft(null);
+  };
+
+  const openCreateGroupModal = () => {
+    setCreateGroupModalOpen(true);
+  };
+
+  const closeCreateGroupModal = () => {
+    setCreateGroupModalOpen(false);
+  };
+
+  const lookupUserByEmail = async (rawQuery: string): Promise<UserProfile | null> => {
+    if (!firebaseUser || !firebaseUser.emailVerified) return null;
+    const cleanEmail = normalizeSearchToken(rawQuery);
+    if (!isEmailLookupQuery(cleanEmail)) return null;
+
+    if (firebaseUser.email?.toLowerCase() === cleanEmail && currentProfile) {
+      return currentProfile;
+    }
+
+    const cached = emailLookupCacheRef.current.get(cleanEmail);
+    if (cached) {
+      if (cached.uid) {
+        const hit = teamUsers.find((u) => u.uid === cached.uid);
+        if (hit) return hit;
+      } else if (Date.now() - cached.checkedAt < 10_000) {
+        return null;
       }
     }
-    setIsFirstLogin(false);
+
+    const emailHash = await hashEmailForLookup(cleanEmail);
+    const lookupPath = `email_lookup/${emailHash}`;
+    try {
+      const snap = await getDoc(doc(db, 'email_lookup', emailHash));
+      if (!snap.exists()) {
+        emailLookupCacheRef.current.set(cleanEmail, { uid: null, checkedAt: Date.now() });
+        return null;
+      }
+      const targetUid = snap.data()?.uid as string;
+      if (!targetUid) return null;
+      emailLookupCacheRef.current.set(cleanEmail, { uid: targetUid, checkedAt: Date.now() });
+
+      const fromList = teamUsers.find((u) => u.uid === targetUid);
+      if (fromList) return fromList;
+
+      const userSnap = await getDoc(doc(db, 'users', targetUid));
+      return userSnap.exists() ? (userSnap.data() as UserProfile) : null;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, lookupPath);
+    }
   };
 
   const ensureContactExists = async (targetUid: string) => {
     if (!firebaseUser || targetUid === firebaseUser.uid) return;
     if (contacts.some((c) => c.uid === targetUid)) return;
     const path = `users/${firebaseUser.uid}/contacts/${targetUid}`;
-    const target = teamUsers.find((u) => u.uid === targetUid);
+    let targetName = teamUsers.find((u) => u.uid === targetUid)?.displayName;
+    if (!targetName) {
+      try {
+        const userSnap = await getDoc(doc(db, 'users', targetUid));
+        if (userSnap.exists()) {
+          targetName = (userSnap.data()?.displayName as string) || undefined;
+        }
+      } catch {
+        // Fallback below
+      }
+    }
+    const cleanName = (targetName || 'Team Member').slice(0, 80);
     try {
       const contactRef = doc(db, 'users', firebaseUser.uid, 'contacts', targetUid);
       const existingSnap = await getDoc(contactRef);
@@ -962,10 +1142,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         await setDoc(contactRef, {
           uid: targetUid,
           addedByUid: firebaseUser.uid,
-          displayName: (target?.displayName || 'Team Member').slice(0, 80),
+          displayName: cleanName,
           createdAt: serverTimestamp(),
         });
       }
+      setContacts((prev) => {
+        if (prev.some((c) => c.uid === targetUid)) return prev;
+        return [
+          ...prev,
+          {
+            uid: targetUid,
+            addedByUid: firebaseUser.uid,
+            displayName: cleanName,
+          },
+        ].sort((a, b) => a.displayName.localeCompare(b.displayName));
+      });
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, path);
     }
@@ -980,18 +1171,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const path = `users/${firebaseUser.uid}/contacts/${targetUid}`;
     try {
       await deleteDoc(doc(db, 'users', firebaseUser.uid, 'contacts', targetUid));
+      setContacts((prev) => prev.filter((c) => c.uid !== targetUid));
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, path);
     }
   };
 
-  const startDirectChat = async (targetUid: string): Promise<string> => {
+  const openOrCreateDirectChat = async (
+    targetUid: string,
+    verifiedAdded = false
+  ): Promise<string> => {
     if (!firebaseUser || targetUid === firebaseUser.uid) return '';
-    await ensureContactExists(targetUid);
 
     const pair = [firebaseUser.uid, targetUid].sort();
     const convId = `dm-${pair[0].slice(0, 20)}-${pair[1].slice(0, 20)}`;
     const existing = conversations.find((c) => c.id === convId);
+
+    if (!verifiedAdded && !contacts.some((c) => c.uid === targetUid)) {
+      if (existing) {
+        setActiveConversationId(existing.id);
+        setActiveTab('chat');
+        return existing.id;
+      }
+      setErrorBanner('Please add this user as a member first before sending messages.');
+      return '';
+    }
+
     if (existing) {
       setActiveConversationId(existing.id);
       setActiveTab('chat');
@@ -1020,6 +1225,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const startDirectChat = async (targetUid: string): Promise<string> => {
+    return openOrCreateDirectChat(targetUid, false);
+  };
+
   const addContactsAndStartChat = async (targetUids: string[]) => {
     if (!firebaseUser) return;
     const unique = Array.from(new Set(targetUids)).filter(
@@ -1029,7 +1238,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       await ensureContactExists(targetUid);
     }
     if (unique.length > 0) {
-      await startDirectChat(unique[0]);
+      await openOrCreateDirectChat(unique[0], true);
     }
   };
 
@@ -1045,6 +1254,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!firebaseUser || !activeConversationId) return;
     const conv = conversations.find((c) => c.id === activeConversationId);
     if (!conv) return;
+
+    if (conv.type === 'direct') {
+      const partnerUid = conv.participantIds.find((id) => id !== firebaseUser.uid);
+      if (partnerUid && !contacts.some((c) => c.uid === partnerUid)) {
+        setErrorBanner('Please add this user as a member first before sending messages.');
+        return;
+      }
+    }
 
     const trimmed = content.trim().slice(0, 5000);
     if (!trimmed && !attachment) return;
@@ -1110,6 +1327,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     mode: 'voice' | 'video' = 'video'
   ): Promise<MeetingRecord | null> => {
     if (!firebaseUser) return null;
+    if (participantIds && participantIds.length > 0) {
+      const unadded = findUnaddedTargetIds(participantIds);
+      if (unadded.length > 0) {
+        setErrorBanner('Please add users as members first before calling or video calling them.');
+        return null;
+      }
+    }
+
     const meetingId = `meet-${Date.now().toString(36)}`;
     const path = `meetings/${meetingId}`;
     const participants = Array.from(
@@ -1197,6 +1422,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     participantIds?: string[];
   }): Promise<MeetingRecord | null> => {
     if (!firebaseUser) return null;
+    if (params.participantIds && params.participantIds.length > 0) {
+      const unadded = findUnaddedTargetIds(params.participantIds);
+      if (unadded.length > 0) {
+        throw new Error('Please add users as members first before inviting them to a meeting.');
+      }
+    }
+
     const tz = params.timeZone || selectedTimezone;
     const conflict = findConflictingScheduledMeeting(params.date, params.time, tz);
     if (conflict) {
@@ -1256,6 +1488,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   ) => {
     if (!firebaseUser) return;
+    if (params.participantIds && params.participantIds.length > 0) {
+      const existingMeeting = meetings.find((m) => m.id === meetingId);
+      const unadded = findUnaddedTargetIds(
+        params.participantIds,
+        existingMeeting?.participantIds || []
+      );
+      if (unadded.length > 0) {
+        throw new Error('Please add users as members first before inviting them to a meeting.');
+      }
+    }
+
     const tz = params.timeZone || selectedTimezone;
     const conflict = findConflictingScheduledMeeting(params.date, params.time, tz, meetingId);
     if (conflict) {
@@ -1411,6 +1654,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     if (!firebaseUser) return;
     const meeting = meetings.find((m) => m.id === meetingId) || activeMeeting;
     if (!meeting) return;
+
+    const unadded = findUnaddedTargetIds(participantIds, meeting.participantIds || []);
+    if (unadded.length > 0) {
+      setErrorBanner('Please add users as members first before adding them to a call.');
+      return;
+    }
 
     const updatedParticipants = Array.from(
       new Set([...meeting.participantIds, firebaseUser.uid, ...participantIds])
@@ -1775,7 +2024,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         currentProfile,
         teamUsers,
         contacts,
-        isFirstLogin,
+        addedMemberIds,
         teamInvites,
         conversations,
         activeConversationId,
@@ -1789,6 +2038,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         presenceNow,
         lastTranscribedMeetingId,
         selectedTimezone,
+        meetingDraft,
+        createGroupModalOpen,
 
         setActiveTab,
         setActiveCallMode,
@@ -1796,7 +2047,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setErrorBanner,
         setLastTranscribedMeetingId,
         setSelectedTimezone,
-        dismissFirstLoginPrompt,
+        openMeetingSchedulerWithDraft,
+        clearMeetingDraft,
+        openCreateGroupModal,
+        closeCreateGroupModal,
+        lookupUserByEmail,
+        isAddedMember,
         refreshAuthUser,
         signOut,
         updateMyProfile,

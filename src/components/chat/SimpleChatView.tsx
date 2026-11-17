@@ -18,10 +18,13 @@ import {
   Users,
   UserPlus,
   Check,
-  Globe,
   Copy,
+  CalendarPlus,
+  Loader2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useEmailSearchMatch } from '../../hooks/useEmailSearchMatch';
+import { matchesUserSearch } from '../../utils/userLookup';
 import { AddMemberModal } from '../common/AddMemberModal';
 import { UserStatusBadge } from '../common/UserStatusBadge';
 import { generateSafetyNumber } from '../../utils/crypto';
@@ -92,7 +95,6 @@ export const SimpleChatView: React.FC = () => {
     firebaseUser,
     currentProfile,
     teamUsers,
-    contacts,
     teamInvites,
     conversations,
     activeConversationId,
@@ -100,10 +102,13 @@ export const SimpleChatView: React.FC = () => {
     messages,
     sendMessage,
     removeMessage,
-    createChannel,
+    openCreateGroupModal,
     updateGroupMembers,
+    addContact,
+    isAddedMember,
     startDirectChat,
     startVideoCall,
+    openMeetingSchedulerWithDraft,
     removeTeamInvite,
     presenceNow,
   } = useApp();
@@ -113,18 +118,10 @@ export const SimpleChatView: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<'all' | UserStatus>('all');
   const [textInput, setTextInput] = useState('');
   const [sending, setSending] = useState(false);
+  const [addingMemberUid, setAddingMemberUid] = useState<string | null>(null);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [addMemberInitialTab, setAddMemberInitialTab] = useState<'available' | 'invite'>('available');
   const [copiedInviteId, setCopiedInviteId] = useState<string | null>(null);
-
-  // Add Group Modal State
-  const [addGroupOpen, setAddGroupOpen] = useState(false);
-  const [newGroupName, setNewGroupName] = useState('');
-  const [newGroupIsPublic, setNewGroupIsPublic] = useState(false);
-  const [selectedGroupMemberIds, setSelectedGroupMemberIds] = useState<string[]>([]);
-  const [groupMemberSearch, setGroupMemberSearch] = useState('');
-  const [creatingGroup, setCreatingGroup] = useState(false);
-  const [groupFormError, setGroupFormError] = useState<string | null>(null);
 
   // Manage Existing Group Members Modal State
   const [membersModalOpen, setMembersModalOpen] = useState(false);
@@ -217,49 +214,15 @@ export const SimpleChatView: React.FC = () => {
     }
   };
 
-  const openAddGroupModal = () => {
-    setNewGroupName('');
-    setNewGroupIsPublic(false);
-    setSelectedGroupMemberIds([]);
-    setGroupMemberSearch('');
-    setGroupFormError(null);
-    setAddGroupOpen(true);
-  };
-
-  const toggleNewGroupMember = (uid: string) => {
-    setSelectedGroupMemberIds((prev) => {
-      if (prev.includes(uid)) {
-        return prev.filter((id) => id !== uid);
-      }
-      if (prev.length >= 49) {
-        setGroupFormError('Groups support up to 50 total members.');
-        return prev;
-      }
-      setGroupFormError(null);
-      return [...prev, uid];
-    });
-  };
-
-  const handleCreateGroup = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newGroupName.trim() || creatingGroup) return;
-    setGroupFormError(null);
-    setCreatingGroup(true);
-    try {
-      await createChannel(newGroupName.trim(), {
-        memberIds: selectedGroupMemberIds,
-        isPublic: newGroupIsPublic,
-      });
-      setAddGroupOpen(false);
-      setNewGroupName('');
-      setSelectedGroupMemberIds([]);
-      setMobileShowThread(true);
-    } catch (err) {
-      setGroupFormError(err instanceof Error ? err.message : 'Could not create group.');
-    } finally {
-      setCreatingGroup(false);
-    }
-  };
+  const {
+    matchedEmailUser,
+    searchingEmail,
+    searchedEmail,
+  } = useEmailSearchMatch(search);
+  const {
+    matchedEmailUser: manageEmailMatch,
+    searchingEmail: searchingManageEmail,
+  } = useEmailSearchMatch(manageMemberSearch);
 
   const openManageMembersModal = () => {
     if (!activeConv) return;
@@ -269,8 +232,21 @@ export const SimpleChatView: React.FC = () => {
     setMembersModalOpen(true);
   };
 
+  const handleAddMember = async (uid: string) => {
+    setAddingMemberUid(uid);
+    try {
+      await addContact(uid);
+    } finally {
+      setAddingMemberUid(null);
+    }
+  };
+
   const toggleExistingGroupMember = (uid: string) => {
     if (!activeConv || uid === activeConv.ownerId) return;
+    if (!editingMemberIds.includes(uid) && !isAddedMember(uid)) {
+      setMembersError('Please add this user as a member first before adding them to the group.');
+      return;
+    }
     setEditingMemberIds((prev) => {
       if (prev.includes(uid)) {
         return prev.filter((id) => id !== uid);
@@ -300,13 +276,12 @@ export const SimpleChatView: React.FC = () => {
 
   const channels = conversations.filter((c) => c.type === 'channel');
   const dms = conversations.filter((c) => c.type === 'direct');
-  const addedUidSet = new Set<string>(contacts.map((c) => c.uid));
-  const addedMembers = sortUsersByPresence(
-    teamUsers.filter((u) => u.uid !== firebaseUser?.uid && addedUidSet.has(u.uid)),
+  const platformUsers = sortUsersByPresence(
+    teamUsers.filter((u) => u.uid !== firebaseUser?.uid),
     firebaseUser?.uid,
     presenceNow
   );
-  const presenceCounts = countUsersByPresence(addedMembers, firebaseUser?.uid, presenceNow);
+  const presenceCounts = countUsersByPresence(platformUsers, firebaseUser?.uid, presenceNow);
 
   const matchesPresenceFilter = (uid: string, status: UserStatus) =>
     statusFilter === 'all' ||
@@ -316,41 +291,19 @@ export const SimpleChatView: React.FC = () => {
       presenceNow
     ) === statusFilter;
 
-  const cleanQuery = search.trim().toLowerCase().replace(/^@/, '');
+  const cleanQuery = search.trim().toLowerCase().replace(/^@+/, '');
   const filteredChannels = channels.filter((c) =>
     c.name.toLowerCase().includes(cleanQuery)
   );
-  const filteredAddedMembers = addedMembers.filter((u) => {
-    const matchesQ =
-      !cleanQuery ||
-      u.displayName.toLowerCase().includes(cleanQuery) ||
-      (u.username || '').toLowerCase().includes(cleanQuery) ||
-      (u.title || '').toLowerCase().includes(cleanQuery) ||
-      (u.department || '').toLowerCase().includes(cleanQuery);
-    return matchesQ && matchesPresenceFilter(u.uid, u.status);
+  const filteredPlatformUsers = platformUsers.filter((u) => {
+    return (
+      matchesUserSearch(u, search, matchedEmailUser?.uid) &&
+      matchesPresenceFilter(u.uid, u.status)
+    );
   });
 
-  const groupSearchClean = groupMemberSearch.trim().toLowerCase().replace(/^@/, '');
-  const modalFilteredTeammates = addedMembers.filter(
-    (u) =>
-      !groupSearchClean ||
-      u.displayName.toLowerCase().includes(groupSearchClean) ||
-      (u.username || '').toLowerCase().includes(groupSearchClean) ||
-      (u.department || '').toLowerCase().includes(groupSearchClean) ||
-      (u.title || '').toLowerCase().includes(groupSearchClean)
-  );
-
-  const manageSearchClean = manageMemberSearch.trim().toLowerCase().replace(/^@/, '');
-  const manageFilteredUsers = teamUsers.filter(
-    (u) =>
-      (u.uid === firebaseUser?.uid ||
-        addedUidSet.has(u.uid) ||
-        Boolean(activeConv?.participantIds?.includes(u.uid))) &&
-      (!manageSearchClean ||
-        u.displayName.toLowerCase().includes(manageSearchClean) ||
-        (u.username || '').toLowerCase().includes(manageSearchClean) ||
-        (u.department || '').toLowerCase().includes(manageSearchClean) ||
-        (u.title || '').toLowerCase().includes(manageSearchClean))
+  const manageFilteredUsers = teamUsers.filter((u) =>
+    matchesUserSearch(u, manageMemberSearch, manageEmailMatch?.uid)
   );
 
   const canManageActiveGroup =
@@ -369,7 +322,12 @@ export const SimpleChatView: React.FC = () => {
         inv.email.toLowerCase().includes(search.toLowerCase()))
   );
 
+  const addedPlatformUsers = filteredPlatformUsers.filter((u) => isAddedMember(u.uid));
+  const availableNonMemberUsers = filteredPlatformUsers.filter((u) => !isAddedMember(u.uid));
+
   const partner = getDirectPartner(activeConv);
+  const partnerIsMember =
+    activeConv?.type === 'direct' && partner ? isAddedMember(partner.uid) : true;
   const safetyCode =
     firebaseUser && partner
       ? generateSafetyNumber(firebaseUser.uid, partner.uid)
@@ -389,11 +347,11 @@ export const SimpleChatView: React.FC = () => {
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-base font-bold text-slate-900">Messages</h2>
             <button
-              onClick={openAddGroupModal}
-              className="min-h-[40px] px-3 rounded-xl bg-sky-50 hover:bg-sky-100 text-xs font-semibold text-sky-700 flex items-center gap-1.5 transition-colors"
+              onClick={openCreateGroupModal}
+              className="min-h-[40px] px-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-xs font-semibold text-white flex items-center gap-1.5 transition-colors"
             >
               <Plus className="w-4 h-4" />
-              <span>Add Group</span>
+              <span>Create Group</span>
             </button>
           </div>
 
@@ -403,13 +361,16 @@ export const SimpleChatView: React.FC = () => {
               type="text"
               value={search}
               onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search groups or team..."
-              className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600"
+              placeholder="Search groups, @username, or @email..."
+              className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-8 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600"
             />
+            {searchingEmail && (
+              <Loader2 className="w-3.5 h-3.5 text-sky-600 animate-spin absolute right-3 top-3" />
+            )}
           </div>
 
-          {/* Live Presence Filter & Counts (Added Contacts Only) */}
-          {addedMembers.length > 0 && (
+          {/* Live Presence Filter & Counts */}
+          {platformUsers.length > 0 && (
             <div className="flex flex-wrap items-center gap-1.5">
               {(['online', 'busy', 'away', 'offline'] as UserStatus[]).map((st) => {
                 const meta = STATUS_META[st];
@@ -439,8 +400,18 @@ export const SimpleChatView: React.FC = () => {
         <div className="flex-1 overflow-y-auto p-3 space-y-5">
           {/* Groups / Channels */}
           <div>
-            <div className="px-2 pb-1.5 text-xs font-semibold text-slate-500">
-              Team Groups ({filteredChannels.length})
+            <div className="px-2 pb-1.5 flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-slate-500">
+                Groups ({filteredChannels.length})
+              </span>
+              <button
+                type="button"
+                onClick={openCreateGroupModal}
+                className="text-[11px] font-semibold text-sky-600 hover:text-sky-700 flex items-center gap-0.5"
+              >
+                <Plus className="w-3 h-3" />
+                <span>Create Group</span>
+              </button>
             </div>
             <div className="space-y-1">
               {filteredChannels.map((conv) => {
@@ -489,141 +460,241 @@ export const SimpleChatView: React.FC = () => {
             </div>
           </div>
 
-          {/* My Chat Contacts (Added Participants & Active DMs) */}
+          {/* All People on SphereCall (Telegram-style immediate directory) */}
           <div>
             <div className="px-2 pb-1.5 flex items-center justify-between gap-2">
               <span className="text-xs font-semibold text-slate-500">
-                My Contacts ({filteredAddedMembers.length})
+                People ({filteredPlatformUsers.length})
               </span>
               <button
                 type="button"
                 onClick={() => {
-                  setAddMemberInitialTab('available');
+                  setAddMemberInitialTab('invite');
                   setAddMemberOpen(true);
                 }}
                 className="min-h-[32px] px-2.5 rounded-lg bg-slate-100 hover:bg-sky-50 text-sky-700 text-xs font-semibold flex items-center gap-1 transition-colors"
               >
                 <UserPlus className="w-3.5 h-3.5" />
-                <span>Add User</span>
+                <span>Invite</span>
               </button>
             </div>
-            {filteredAddedMembers.length === 0 && pendingInvites.length === 0 ? (
+            {filteredPlatformUsers.length === 0 && pendingInvites.length === 0 ? (
               <div className="px-3 py-3.5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-xs text-slate-500 space-y-2">
                 <p>
-                  No contacts added yet. Search by <span className="font-semibold text-slate-700">@username</span> or name to add users and see their live status.
+                  {searchingEmail
+                    ? 'Searching users by email...'
+                    : platformUsers.length === 0
+                    ? 'No other users have signed up yet. Invite someone by email to start chatting and calling.'
+                    : searchedEmail
+                    ? `No registered user found for ${searchedEmail}.`
+                    : 'No users match your current search or status filter.'}
                 </p>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAddMemberInitialTab('available');
-                    setAddMemberOpen(true);
-                  }}
-                  className="text-sky-600 hover:text-sky-700 font-semibold inline-flex items-center gap-1"
-                >
-                  <UserPlus className="w-3.5 h-3.5" />
-                  <span>Find &amp; Add User by @username</span>
-                </button>
+                {(platformUsers.length === 0 || (searchedEmail && !searchingEmail)) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAddMemberInitialTab('invite');
+                      setAddMemberOpen(true);
+                    }}
+                    className="text-sky-600 hover:text-sky-700 font-semibold inline-flex items-center gap-1"
+                  >
+                    <UserPlus className="w-3.5 h-3.5" />
+                    <span>
+                      {searchedEmail ? `Invite ${searchedEmail}` : 'Invite Member by Email'}
+                    </span>
+                  </button>
+                )}
               </div>
             ) : (
-              <div className="space-y-1">
-                {filteredAddedMembers.map((member) => {
-                  const matchingDm = dms.find((d) => d.participantIds.includes(member.uid));
-                  const isActive = matchingDm?.id === activeConv?.id;
-                  const initials = member.displayName.slice(0, 2).toUpperCase();
-                  const effectiveStatus = getEffectiveUserStatus(
-                    member,
-                    firebaseUser?.uid,
-                    presenceNow
-                  );
-                  const meta = STATUS_META[effectiveStatus];
-
-                  return (
-                    <div
-                      key={member.uid}
-                      className={`w-full min-h-[56px] px-3 py-2 rounded-xl flex items-center gap-2 transition-colors ${
-                        isActive
-                          ? 'bg-sky-50 text-sky-900 border border-sky-200'
-                          : 'hover:bg-slate-100 text-slate-700'
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          await startDirectChat(member.uid);
-                          setMobileShowThread(true);
-                        }}
-                        className="flex-1 min-w-0 flex items-center gap-3 text-left"
-                      >
-                        <div className="relative shrink-0">
-                          {member.avatar ? (
-                            <img
-                              src={member.avatar}
-                              alt={member.displayName}
-                              referrerPolicy="no-referrer"
-                              className="w-9 h-9 rounded-full object-cover border border-slate-200"
-                            />
-                          ) : (
-                            <div className="w-9 h-9 rounded-full bg-slate-200 text-slate-700 font-semibold text-xs flex items-center justify-center">
-                              {initials}
-                            </div>
-                          )}
-                          <span
-                            className={`w-2.5 h-2.5 rounded-full border-2 border-white absolute bottom-0 right-0 ${meta.dotClass}`}
-                            title={meta.label}
-                          />
-                        </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center justify-between gap-1.5">
-                            <span className="text-sm font-semibold text-slate-900 truncate">
-                              {member.displayName}
-                            </span>
-                            <span className={`text-[10px] font-semibold shrink-0 ${meta.textClass}`}>
-                              {meta.label}
-                            </span>
-                          </div>
-                          <div className="text-xs text-slate-500 truncate">
-                            {matchingDm?.lastMessageText ||
-                              (member.username ? `@${member.username}` : '') ||
-                              member.title ||
-                              meta.label}
-                          </div>
-                        </div>
-                      </button>
-                      <div className="flex items-center gap-1 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            startVideoCall(
-                              `Voice Call with ${member.displayName}`,
-                              [firebaseUser!.uid, member.uid],
-                              'voice'
-                            )
-                          }
-                          className="min-h-[34px] min-w-[34px] rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0"
-                          title={`Voice call ${member.displayName}`}
-                          aria-label={`Voice call ${member.displayName}`}
-                        >
-                          <Phone className="w-3.5 h-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            startVideoCall(
-                              `Call with ${member.displayName}`,
-                              [firebaseUser!.uid, member.uid],
-                              'video'
-                            )
-                          }
-                          className="min-h-[34px] min-w-[34px] rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 flex items-center justify-center shrink-0"
-                          title={`Video call ${member.displayName}`}
-                          aria-label={`Video call ${member.displayName}`}
-                        >
-                          <Video className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
+              <div className="space-y-3">
+                {addedPlatformUsers.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="px-2 text-[11px] font-semibold text-emerald-700">
+                      Added Members ({addedPlatformUsers.length})
                     </div>
-                  );
-                })}
+                    {addedPlatformUsers.map((member) => {
+                      const matchingDm = dms.find((d) => d.participantIds.includes(member.uid));
+                      const isActive = matchingDm?.id === activeConv?.id;
+                      const initials = member.displayName.slice(0, 2).toUpperCase();
+                      const effectiveStatus = getEffectiveUserStatus(
+                        member,
+                        firebaseUser?.uid,
+                        presenceNow
+                      );
+                      const meta = STATUS_META[effectiveStatus];
+
+                      return (
+                        <div
+                          key={member.uid}
+                          className={`w-full min-h-[56px] px-3 py-2 rounded-xl flex items-center gap-2 transition-colors ${
+                            isActive
+                              ? 'bg-sky-50 text-sky-900 border border-sky-200'
+                              : 'hover:bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await startDirectChat(member.uid);
+                              setMobileShowThread(true);
+                            }}
+                            className="flex-1 min-w-0 flex items-center gap-3 text-left"
+                          >
+                            <div className="relative shrink-0">
+                              {member.avatar ? (
+                                <img
+                                  src={member.avatar}
+                                  alt={member.displayName}
+                                  referrerPolicy="no-referrer"
+                                  className="w-9 h-9 rounded-full object-cover border border-slate-200"
+                                />
+                              ) : (
+                                <div className="w-9 h-9 rounded-full bg-slate-200 text-slate-700 font-semibold text-xs flex items-center justify-center">
+                                  {initials}
+                                </div>
+                              )}
+                              <span
+                                className={`w-2.5 h-2.5 rounded-full border-2 border-white absolute bottom-0 right-0 ${meta.dotClass}`}
+                                title={meta.label}
+                              />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-1.5">
+                                <span className="text-sm font-semibold text-slate-900 truncate">
+                                  {member.displayName}
+                                </span>
+                                <span className={`text-[10px] font-semibold shrink-0 ${meta.textClass}`}>
+                                  {meta.label}
+                                </span>
+                              </div>
+                              <div className="text-xs text-slate-500 truncate">
+                                {matchingDm?.lastMessageText ||
+                                  (member.username ? `@${member.username}` : '') ||
+                                  member.title ||
+                                  meta.label}
+                              </div>
+                            </div>
+                          </button>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                startVideoCall(
+                                  `Voice Call with ${member.displayName}`,
+                                  [firebaseUser!.uid, member.uid],
+                                  'voice'
+                                )
+                              }
+                              className="min-h-[40px] min-w-[40px] sm:min-h-[34px] sm:min-w-[34px] rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0"
+                              title={`Voice call ${member.displayName}`}
+                              aria-label={`Voice call ${member.displayName}`}
+                            >
+                              <Phone className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                startVideoCall(
+                                  `Call with ${member.displayName}`,
+                                  [firebaseUser!.uid, member.uid],
+                                  'video'
+                                )
+                              }
+                              className="min-h-[40px] min-w-[40px] sm:min-h-[34px] sm:min-w-[34px] rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 flex items-center justify-center shrink-0"
+                              title={`Video call ${member.displayName}`}
+                              aria-label={`Video call ${member.displayName}`}
+                            >
+                              <Video className="w-4 h-4 sm:w-3.5 sm:h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+
+                {availableNonMemberUsers.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="px-2 flex items-center justify-between text-[11px] font-semibold text-slate-500">
+                      <span>Available Users ({availableNonMemberUsers.length})</span>
+                      <span className="font-normal text-[10px] text-slate-400">
+                        Add to chat/call
+                      </span>
+                    </div>
+                    {availableNonMemberUsers.map((member) => {
+                      const matchingDm = dms.find((d) => d.participantIds.includes(member.uid));
+                      const isActive = matchingDm?.id === activeConv?.id;
+                      const initials = member.displayName.slice(0, 2).toUpperCase();
+                      const effectiveStatus = getEffectiveUserStatus(
+                        member,
+                        firebaseUser?.uid,
+                        presenceNow
+                      );
+                      const meta = STATUS_META[effectiveStatus];
+                      const isAdding = addingMemberUid === member.uid;
+
+                      return (
+                        <div
+                          key={member.uid}
+                          className={`w-full min-h-[56px] px-3 py-2 rounded-xl flex items-center gap-2 transition-colors border ${
+                            isActive
+                              ? 'bg-sky-50 text-sky-900 border-sky-200'
+                              : 'bg-slate-50/70 border-slate-200/70 text-slate-700'
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0 flex items-center gap-3 text-left">
+                            <div className="relative shrink-0">
+                              {member.avatar ? (
+                                <img
+                                  src={member.avatar}
+                                  alt={member.displayName}
+                                  referrerPolicy="no-referrer"
+                                  className="w-9 h-9 rounded-full object-cover border border-slate-200"
+                                />
+                              ) : (
+                                <div className="w-9 h-9 rounded-full bg-slate-200 text-slate-700 font-semibold text-xs flex items-center justify-center">
+                                  {initials}
+                                </div>
+                              )}
+                              <span
+                                className={`w-2.5 h-2.5 rounded-full border-2 border-white absolute bottom-0 right-0 ${meta.dotClass}`}
+                                title={meta.label}
+                              />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-1.5">
+                                <span className="text-sm font-semibold text-slate-900 truncate">
+                                  {member.displayName}
+                                </span>
+                                <span className={`text-[10px] font-semibold shrink-0 ${meta.textClass}`}>
+                                  {meta.label}
+                                </span>
+                              </div>
+                              <div className="text-[11px] text-slate-500 truncate">
+                                {member.username ? `@${member.username}` : member.title || meta.label}
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={isAdding}
+                            onClick={() => handleAddMember(member.uid)}
+                            className="min-h-[32px] px-2.5 rounded-lg bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-[11px] font-semibold flex items-center gap-1 shrink-0 transition-colors"
+                            title={`Add ${member.displayName} as a member to message and call`}
+                          >
+                            {isAdding ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <UserPlus className="w-3 h-3" />
+                            )}
+                            <span>Add Member</span>
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
 
                 {pendingInvites.map((invite) => (
                   <div
@@ -688,11 +759,11 @@ export const SimpleChatView: React.FC = () => {
         {activeConv ? (
           <>
             {/* Conversation Header */}
-            <div className="h-14 bg-white border-b border-slate-200 px-3 sm:px-6 flex items-center justify-between gap-2 shrink-0">
-              <div className="flex items-center gap-2 min-w-0">
+            <div className="min-h-[3.5rem] py-1.5 bg-white border-b border-slate-200 px-2.5 sm:px-6 flex items-center justify-between gap-2 shrink-0">
+              <div className="flex items-center gap-2 min-w-0 flex-1">
                 <button
                   onClick={() => setMobileShowThread(false)}
-                  className="md:hidden min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-600 hover:text-slate-900 -ml-2"
+                  className="md:hidden min-h-[44px] min-w-[44px] flex items-center justify-center text-slate-600 hover:text-slate-900 -ml-1.5 shrink-0"
                   aria-label="Back to conversations"
                 >
                   <ArrowLeft className="w-5 h-5" />
@@ -718,15 +789,17 @@ export const SimpleChatView: React.FC = () => {
                     />
                   </div>
                 )}
-                <div className="min-w-0">
+                <div className="min-w-0 flex-1">
                   <h3 className="text-sm sm:text-base font-bold text-slate-900 truncate">
                     {getConversationTitle(activeConv)}
                   </h3>
-                  <div className="text-xs text-slate-500 flex items-center gap-1.5">
+                  <div className="text-xs text-slate-500 flex items-center gap-1.5 min-w-0">
                     {activeConv.type === 'direct' && partner ? (
                       <>
                         {partner.username && (
-                          <span className="font-medium text-slate-600">@{partner.username}</span>
+                          <span className="font-medium text-slate-600 truncate max-w-[100px] sm:max-w-none">
+                            @{partner.username}
+                          </span>
                         )}
                         <UserStatusBadge
                           status={getEffectiveUserStatus(partner, firebaseUser?.uid, presenceNow)}
@@ -734,7 +807,7 @@ export const SimpleChatView: React.FC = () => {
                         />
                       </>
                     ) : (
-                      <span>
+                      <span className="truncate">
                         {activeConv.type === 'direct'
                           ? 'Direct message'
                           : activeConv.isPublic
@@ -745,32 +818,78 @@ export const SimpleChatView: React.FC = () => {
                     <span aria-hidden="true">·</span>
                     <button
                       onClick={() => setSafetyModalOpen(true)}
-                      className="inline-flex items-center gap-1 text-emerald-700 hover:underline font-medium"
+                      className="inline-flex items-center gap-1 text-emerald-700 hover:underline font-medium shrink-0"
+                      title="View encryption verification key"
+                      aria-label="Encrypted session verification"
                     >
                       <Lock className="w-3 h-3" />
-                      <span>Encrypted</span>
+                      <span className="hidden sm:inline">Encrypted</span>
                     </button>
                   </div>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0">
+              <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+                {activeConv.type === 'direct' && partner && !partnerIsMember && (
+                  <button
+                    type="button"
+                    disabled={addingMemberUid === partner.uid}
+                    onClick={() => handleAddMember(partner.uid)}
+                    className="min-h-[40px] px-2.5 sm:px-3 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0"
+                    title="Add as member to unlock messaging and calling"
+                  >
+                    {addingMemberUid === partner.uid ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <UserPlus className="w-4 h-4" />
+                    )}
+                    <span>Add Member</span>
+                  </button>
+                )}
+
                 {activeConv.type === 'channel' && (
                   <button
                     onClick={openManageMembersModal}
-                    className="min-h-[40px] px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0"
+                    className="min-h-[40px] px-2 sm:px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1 sm:gap-1.5 transition-colors shrink-0"
                     title="Add or manage group members"
                   >
                     <UserPlus className="w-4 h-4 text-sky-600" />
-                    <span className="hidden sm:inline">Add Member</span>
+                    <span className="hidden sm:inline">Members</span>
                     <span className="tabular-nums text-slate-500">
-                      ({activeConv.isPublic ? addedMembers.length + 1 : activeConv.participantIds?.length || 1})
+                      ({activeConv.isPublic ? platformUsers.length + 1 : activeConv.participantIds?.length || 1})
                     </span>
                   </button>
                 )}
 
                 <button
                   type="button"
+                  disabled={!partnerIsMember}
+                  onClick={() =>
+                    openMeetingSchedulerWithDraft({
+                      title: `${getConversationTitle(activeConv).replace(/^#\s*/, '')} Sync`,
+                      participantIds: activeConv.isPublic
+                        ? []
+                        : (activeConv.participantIds || []).filter((id) => id !== firebaseUser?.uid),
+                      mode: 'video',
+                    })
+                  }
+                  className={`min-h-[40px] min-w-[40px] px-2 sm:px-3 py-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 disabled:opacity-45 disabled:cursor-not-allowed text-slate-700 text-xs font-semibold items-center justify-center gap-1.5 transition-colors shrink-0 ${
+                    partnerIsMember ? 'flex' : 'hidden sm:flex'
+                  }`}
+                  title={
+                    partnerIsMember
+                      ? 'Schedule a meeting with these members'
+                      : 'Add as member first to schedule a meeting'
+                  }
+                  aria-label="Schedule meeting"
+                >
+                  <CalendarPlus className="w-4 h-4 text-sky-600" />
+                  <span className="hidden lg:inline">Meeting</span>
+                </button>
+
+                <button
+                  type="button"
+                  disabled={!partnerIsMember}
                   onClick={() =>
                     startVideoCall(
                       `Voice Call: ${getConversationTitle(activeConv)}`,
@@ -778,8 +897,11 @@ export const SimpleChatView: React.FC = () => {
                       'voice'
                     )
                   }
-                  className="min-h-[40px] px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-700 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0"
-                  title="Start Voice Call"
+                  className={`min-h-[40px] min-w-[40px] px-2.5 sm:px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 disabled:opacity-45 disabled:cursor-not-allowed text-emerald-700 text-xs font-semibold items-center justify-center gap-1.5 transition-colors shrink-0 ${
+                    partnerIsMember ? 'flex' : 'hidden sm:flex'
+                  }`}
+                  title={partnerIsMember ? 'Start Voice Call' : 'Add as member first to voice call'}
+                  aria-label="Start Voice Call"
                 >
                   <Phone className="w-4 h-4" />
                   <span className="hidden sm:inline">Voice</span>
@@ -787,6 +909,7 @@ export const SimpleChatView: React.FC = () => {
 
                 <button
                   type="button"
+                  disabled={!partnerIsMember}
                   onClick={() =>
                     startVideoCall(
                       `Call: ${getConversationTitle(activeConv)}`,
@@ -794,8 +917,11 @@ export const SimpleChatView: React.FC = () => {
                       'video'
                     )
                   }
-                  className="min-h-[40px] px-3 sm:px-3.5 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0"
-                  title="Start Video Call"
+                  className={`min-h-[40px] min-w-[40px] px-2.5 sm:px-3.5 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 disabled:opacity-45 disabled:cursor-not-allowed text-sky-700 text-xs font-semibold items-center justify-center gap-1.5 transition-colors shrink-0 ${
+                    partnerIsMember ? 'flex' : 'hidden sm:flex'
+                  }`}
+                  title={partnerIsMember ? 'Start Video Call' : 'Add as member first to video call'}
+                  aria-label="Start Video Call"
                 >
                   <Video className="w-4 h-4" />
                   <span className="hidden sm:inline">Video</span>
@@ -921,85 +1047,111 @@ export const SimpleChatView: React.FC = () => {
 
             {/* Composer */}
             <div className="bg-white border-t border-slate-200 p-3 sm:p-4 shrink-0 space-y-2">
-              {uploadError && (
-                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{uploadError}</span>
-                  </div>
-                  <button onClick={() => setUploadError(null)} className="p-1">
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              )}
-
-              {pendingAttachment && (
-                <div className="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs">
-                  <div className="flex items-center gap-2.5 min-w-0">
-                    {pendingAttachment.type === 'image' ? (
-                      <img
-                        src={pendingAttachment.data}
-                        alt="Preview"
-                        className="w-9 h-9 rounded-lg object-cover border border-slate-200"
-                      />
-                    ) : (
-                      <FileText className="w-5 h-5 text-sky-600 shrink-0" />
-                    )}
-                    <div className="min-w-0">
-                      <div className="font-semibold text-slate-800 truncate">
-                        {pendingAttachment.name}
-                      </div>
-                      <div className="text-slate-500 tabular-nums">
-                        {(pendingAttachment.size / 1024).toFixed(1)} KB
-                      </div>
-                    </div>
+              {activeConv.type === 'direct' && partner && !partnerIsMember ? (
+                <div className="p-3 sm:p-3.5 rounded-xl bg-amber-50 border border-amber-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="text-xs text-amber-950 space-y-0.5">
+                    <div className="font-bold">Add {partner.displayName} as a member first</div>
+                    <p className="text-amber-800">
+                      You can view available users on SphereCall, but you must add them as a member before sending messages or starting a voice or video call.
+                    </p>
                   </div>
                   <button
-                    onClick={() => setPendingAttachment(null)}
-                    className="min-h-[36px] min-w-[36px] flex items-center justify-center text-slate-400 hover:text-rose-600"
-                    aria-label="Remove attachment"
+                    type="button"
+                    disabled={addingMemberUid === partner.uid}
+                    onClick={() => handleAddMember(partner.uid)}
+                    className="min-h-[40px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center justify-center gap-1.5 shrink-0 transition-colors"
                   >
-                    <X className="w-4 h-4" />
+                    {addingMemberUid === partner.uid ? (
+                      <Loader2 className="w-4 h-4 animate-spin" />
+                    ) : (
+                      <UserPlus className="w-4 h-4" />
+                    )}
+                    <span>Add Member</span>
                   </button>
                 </div>
+              ) : (
+                <>
+                  {uploadError && (
+                    <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0" />
+                        <span>{uploadError}</span>
+                      </div>
+                      <button onClick={() => setUploadError(null)} className="p-1">
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  )}
+
+                  {pendingAttachment && (
+                    <div className="flex items-center justify-between bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-xs">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        {pendingAttachment.type === 'image' ? (
+                          <img
+                            src={pendingAttachment.data}
+                            alt="Preview"
+                            className="w-9 h-9 rounded-lg object-cover border border-slate-200"
+                          />
+                        ) : (
+                          <FileText className="w-5 h-5 text-sky-600 shrink-0" />
+                        )}
+                        <div className="min-w-0">
+                          <div className="font-semibold text-slate-800 truncate">
+                            {pendingAttachment.name}
+                          </div>
+                          <div className="text-slate-500 tabular-nums">
+                            {(pendingAttachment.size / 1024).toFixed(1)} KB
+                          </div>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => setPendingAttachment(null)}
+                        className="min-h-[36px] min-w-[36px] flex items-center justify-center text-slate-400 hover:text-rose-600"
+                        aria-label="Remove attachment"
+                      >
+                        <X className="w-4 h-4" />
+                      </button>
+                    </div>
+                  )}
+
+                  <form onSubmit={handleSend} className="flex items-center gap-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      className="hidden"
+                      onChange={handleFilePick}
+                      accept="image/*,.pdf,.doc,.docx,.txt,.csv,.zip"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="min-h-[44px] min-w-[44px] rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600 flex items-center justify-center shrink-0 transition-colors"
+                      title="Share image or file"
+                      aria-label="Share image or file"
+                    >
+                      <Paperclip className="w-5 h-5" />
+                    </button>
+
+                    <input
+                      type="text"
+                      value={textInput}
+                      onChange={(e) => setTextInput(e.target.value)}
+                      placeholder="Write a message..."
+                      className="flex-1 min-h-[44px] bg-slate-50 border border-slate-200 rounded-xl px-4 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
+                    />
+
+                    <button
+                      type="submit"
+                      disabled={sending || (!textInput.trim() && !pendingAttachment)}
+                      className="min-h-[44px] min-w-[44px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold text-sm flex items-center justify-center gap-1.5 shrink-0 transition-colors"
+                      aria-label="Send message"
+                    >
+                      <Send className="w-4 h-4" />
+                      <span className="hidden sm:inline">Send</span>
+                    </button>
+                  </form>
+                </>
               )}
-
-              <form onSubmit={handleSend} className="flex items-center gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  className="hidden"
-                  onChange={handleFilePick}
-                  accept="image/*,.pdf,.doc,.docx,.txt,.csv,.zip"
-                />
-                <button
-                  type="button"
-                  onClick={() => fileInputRef.current?.click()}
-                  className="min-h-[44px] min-w-[44px] rounded-xl border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-600 flex items-center justify-center shrink-0 transition-colors"
-                  title="Share image or file"
-                  aria-label="Share image or file"
-                >
-                  <Paperclip className="w-5 h-5" />
-                </button>
-
-                <input
-                  type="text"
-                  value={textInput}
-                  onChange={(e) => setTextInput(e.target.value)}
-                  placeholder="Write a message..."
-                  className="flex-1 min-h-[44px] bg-slate-50 border border-slate-200 rounded-xl px-4 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
-                />
-
-                <button
-                  type="submit"
-                  disabled={sending || (!textInput.trim() && !pendingAttachment)}
-                  className="min-h-[44px] min-w-[44px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-slate-200 disabled:text-slate-400 text-white font-semibold text-sm flex items-center justify-center gap-1.5 shrink-0 transition-colors"
-                  aria-label="Send message"
-                >
-                  <Send className="w-4 h-4" />
-                  <span className="hidden sm:inline">Send</span>
-                </button>
-              </form>
             </div>
           </>
         ) : (
@@ -1009,275 +1161,11 @@ export const SimpleChatView: React.FC = () => {
         )}
       </main>
 
-      {/* Add Group Modal (with Add Team Members) */}
-      {addGroupOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <form
-            onSubmit={handleCreateGroup}
-            className="bg-white border border-slate-200 rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden"
-          >
-            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2.5">
-                <div className="w-8 h-8 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center">
-                  <Users className="w-4 h-4" />
-                </div>
-                <h3 className="text-base font-bold text-slate-900">Add New Group</h3>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAddGroupOpen(false)}
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center text-slate-400 hover:text-slate-700"
-                aria-label="Close"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-5 overflow-y-auto flex-1">
-              {groupFormError && (
-                <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                  <span>{groupFormError}</span>
-                </div>
-              )}
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  Group Name
-                </label>
-                <input
-                  type="text"
-                  required
-                  maxLength={100}
-                  value={newGroupName}
-                  onChange={(e) => setNewGroupName(e.target.value)}
-                  placeholder="e.g. Marketing Team, Project Alpha"
-                  className="w-full min-h-[44px] bg-slate-50 border border-slate-300 rounded-xl px-3.5 text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  Group Privacy
-                </label>
-                <div className="grid grid-cols-2 gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => setNewGroupIsPublic(false)}
-                    className={`min-h-[56px] p-3 rounded-xl border text-left transition-colors ${
-                      !newGroupIsPublic
-                        ? 'border-sky-600 bg-sky-50 text-sky-950'
-                        : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 text-xs font-bold">
-                      <Lock className="w-3.5 h-3.5 text-sky-600" />
-                      <span>Private Group</span>
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">
-                      Only selected members
-                    </div>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => setNewGroupIsPublic(true)}
-                    className={`min-h-[56px] p-3 rounded-xl border text-left transition-colors ${
-                      newGroupIsPublic
-                        ? 'border-sky-600 bg-sky-50 text-sky-950'
-                        : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
-                    }`}
-                  >
-                    <div className="flex items-center gap-1.5 text-xs font-bold">
-                      <Globe className="w-3.5 h-3.5 text-sky-600" />
-                      <span>Open Team Group</span>
-                    </div>
-                    <div className="text-[11px] text-slate-500 mt-0.5">
-                      Visible to all teammates
-                    </div>
-                  </button>
-                </div>
-              </div>
-
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between gap-2">
-                  <label className="text-xs font-semibold text-slate-700">
-                    Add Team Members ({selectedGroupMemberIds.length + 1} selected)
-                  </label>
-                  <div className="flex items-center gap-2 text-xs">
-                    <button
-                      type="button"
-                      onClick={() => setAddMemberOpen(true)}
-                      className="text-sky-600 hover:text-sky-700 font-semibold flex items-center gap-1"
-                    >
-                      <UserPlus className="w-3.5 h-3.5" />
-                      <span>Invite New</span>
-                    </button>
-                    {addedMembers.length > 0 && (
-                      <>
-                        <span className="text-slate-300">|</span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setSelectedGroupMemberIds(
-                              addedMembers.slice(0, 49).map((m) => m.uid)
-                            )
-                          }
-                          className="text-sky-600 hover:text-sky-700 font-semibold"
-                        >
-                          Select all
-                        </button>
-                        <span className="text-slate-300">|</span>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedGroupMemberIds([])}
-                          className="text-slate-500 hover:text-slate-700 font-medium"
-                        >
-                          Clear
-                        </button>
-                      </>
-                    )}
-                  </div>
-                </div>
-
-                <div className="relative">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                  <input
-                    type="text"
-                    value={groupMemberSearch}
-                    onChange={(e) => setGroupMemberSearch(e.target.value)}
-                    placeholder="Search added contacts by name or @username..."
-                    className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
-                  />
-                </div>
-
-                <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-52 overflow-y-auto">
-                  {/* Creator (always included) */}
-                  <div className="px-3 py-2.5 flex items-center justify-between bg-slate-50/70">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <div className="w-8 h-8 rounded-full bg-sky-600 text-white text-xs font-bold flex items-center justify-center shrink-0">
-                        {(currentProfile?.displayName || 'Y').slice(0, 2).toUpperCase()}
-                      </div>
-                      <div className="min-w-0">
-                        <div className="text-xs font-semibold text-slate-900 truncate">
-                          {currentProfile?.displayName || 'You'} (You)
-                        </div>
-                        <div className="text-[11px] text-slate-500">Group Creator</div>
-                      </div>
-                    </div>
-                    <span className="text-[11px] font-semibold text-sky-700 shrink-0">
-                      Included
-                    </span>
-                  </div>
-
-                  {addedMembers.length === 0 ? (
-                    <div className="p-4 text-center text-xs text-slate-500">
-                      No contacts added yet. Search and add users by @username first, or create the group now and add members later.
-                    </div>
-                  ) : modalFilteredTeammates.length === 0 ? (
-                    <div className="p-4 text-center text-xs text-slate-500">
-                      No added contacts match "{groupMemberSearch}".
-                    </div>
-                  ) : (
-                    modalFilteredTeammates.map((member) => {
-                      const isSelected = selectedGroupMemberIds.includes(member.uid);
-                      const effectiveStatus = getEffectiveUserStatus(
-                        member,
-                        firebaseUser?.uid,
-                        presenceNow
-                      );
-                      const meta = STATUS_META[effectiveStatus];
-                      return (
-                        <button
-                          key={member.uid}
-                          type="button"
-                          onClick={() => toggleNewGroupMember(member.uid)}
-                          className={`w-full min-h-[48px] px-3 py-2 flex items-center justify-between gap-3 text-left transition-colors ${
-                            isSelected ? 'bg-sky-50/70' : 'hover:bg-slate-50'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <div className="relative shrink-0">
-                              {member.avatar ? (
-                                <img
-                                  src={member.avatar}
-                                  alt={member.displayName}
-                                  referrerPolicy="no-referrer"
-                                  className="w-8 h-8 rounded-full object-cover border border-slate-200"
-                                />
-                              ) : (
-                                <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center">
-                                  {member.displayName.slice(0, 2).toUpperCase()}
-                                </div>
-                              )}
-                              <span
-                                className={`w-2.5 h-2.5 rounded-full border-2 border-white absolute bottom-0 right-0 ${meta.dotClass}`}
-                                title={meta.label}
-                              />
-                            </div>
-                            <div className="min-w-0">
-                              <div className="text-xs font-semibold text-slate-900 truncate">
-                                {member.displayName}
-                              </div>
-                              <div className="text-[11px] text-slate-500 truncate flex items-center gap-1.5">
-                                {member.username && (
-                                  <span className="font-medium text-slate-600">@{member.username}</span>
-                                )}
-                                <span className={`font-semibold ${meta.textClass}`}>
-                                  {meta.label}
-                                </span>
-                                {(member.title || member.department) && (
-                                  <span className="truncate">
-                                    · {[member.title, member.department].filter(Boolean).join(' · ')}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-
-                          <div
-                            className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
-                              isSelected
-                                ? 'bg-sky-600 border-sky-600 text-white'
-                                : 'border-slate-300 bg-white'
-                            }`}
-                          >
-                            {isSelected && <Check className="w-3.5 h-3.5" />}
-                          </div>
-                        </button>
-                      );
-                    })
-                  )}
-                </div>
-              </div>
-            </div>
-
-            <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-end gap-2.5 shrink-0">
-              <button
-                type="button"
-                onClick={() => setAddGroupOpen(false)}
-                className="min-h-[42px] px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={creatingGroup || !newGroupName.trim()}
-                className="min-h-[42px] px-5 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:bg-slate-300 text-white text-xs font-semibold flex items-center gap-1.5"
-              >
-                <Plus className="w-4 h-4" />
-                <span>{creatingGroup ? 'Creating...' : 'Create Group'}</span>
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
       {/* Manage / View Existing Group Members Modal */}
       {membersModalOpen && activeConv && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md max-h-[88vh] flex flex-col overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between shrink-0">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md max-h-[90dvh] flex flex-col overflow-hidden">
+            <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-2 shrink-0">
               <div className="min-w-0">
                 <h3 className="text-base font-bold text-slate-900 truncate">
                   {activeConv.name} Members
@@ -1290,14 +1178,14 @@ export const SimpleChatView: React.FC = () => {
               </div>
               <button
                 onClick={() => setMembersModalOpen(false)}
-                className="min-h-[36px] min-w-[36px] flex items-center justify-center text-slate-400 hover:text-slate-700 shrink-0"
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center text-slate-400 hover:text-slate-700 shrink-0"
                 aria-label="Close"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <div className="p-5 space-y-3 overflow-y-auto flex-1">
+            <div className="p-4 sm:p-5 space-y-3 overflow-y-auto flex-1">
               {membersError && (
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
@@ -1311,15 +1199,20 @@ export const SimpleChatView: React.FC = () => {
                   type="text"
                   value={manageMemberSearch}
                   onChange={(e) => setManageMemberSearch(e.target.value)}
-                  placeholder="Search team members..."
-                  className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
+                  placeholder="Find by name, @username, or @email..."
+                  className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-9 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
                 />
+                {searchingManageEmail && (
+                  <Loader2 className="w-3.5 h-3.5 text-sky-600 animate-spin absolute right-3 top-3" />
+                )}
               </div>
 
               <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-64 overflow-y-auto">
                 {manageFilteredUsers.map((member) => {
                   const isOwner = member.uid === activeConv.ownerId;
                   const isIncluded = editingMemberIds.includes(member.uid);
+                  const memberAdded = isAddedMember(member.uid);
+                  const isAdding = addingMemberUid === member.uid;
                   const effectiveStatus = getEffectiveUserStatus(
                     member,
                     firebaseUser?.uid,
@@ -1328,13 +1221,15 @@ export const SimpleChatView: React.FC = () => {
                   const meta = STATUS_META[effectiveStatus];
 
                   return (
-                    <button
+                    <div
                       key={member.uid}
-                      type="button"
-                      disabled={!canManageActiveGroup || isOwner}
-                      onClick={() => toggleExistingGroupMember(member.uid)}
+                      onClick={() => {
+                        if (canManageActiveGroup && !isOwner && (isIncluded || memberAdded)) {
+                          toggleExistingGroupMember(member.uid);
+                        }
+                      }}
                       className={`w-full min-h-[48px] px-3 py-2 flex items-center justify-between gap-3 text-left transition-colors ${
-                        canManageActiveGroup && !isOwner
+                        canManageActiveGroup && !isOwner && (isIncluded || memberAdded)
                           ? 'hover:bg-slate-50 cursor-pointer'
                           : 'cursor-default'
                       }`}
@@ -1384,27 +1279,46 @@ export const SimpleChatView: React.FC = () => {
                           Owner
                         </span>
                       ) : canManageActiveGroup ? (
-                        <div
-                          className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
-                            isIncluded
-                              ? 'bg-sky-600 border-sky-600 text-white'
-                              : 'border-slate-300 bg-white'
-                          }`}
-                        >
-                          {isIncluded && <Check className="w-3.5 h-3.5" />}
-                        </div>
+                        isIncluded || memberAdded ? (
+                          <div
+                            className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
+                              isIncluded
+                                ? 'bg-sky-600 border-sky-600 text-white'
+                                : 'border-slate-300 bg-white'
+                            }`}
+                          >
+                            {isIncluded && <Check className="w-3.5 h-3.5" />}
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isAdding}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleAddMember(member.uid);
+                            }}
+                            className="min-h-[30px] px-2.5 rounded-lg bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-[11px] font-semibold flex items-center gap-1 shrink-0"
+                          >
+                            {isAdding ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <UserPlus className="w-3 h-3" />
+                            )}
+                            <span>Add Member</span>
+                          </button>
+                        )
                       ) : (
                         <span className="text-[11px] font-medium text-slate-500 shrink-0">
                           {isIncluded ? 'Member' : ''}
                         </span>
                       )}
-                    </button>
+                    </div>
                   );
                 })}
               </div>
             </div>
 
-            <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between gap-2.5 shrink-0">
+            <div className="px-4 sm:px-6 py-4 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2.5 shrink-0">
               <button
                 type="button"
                 onClick={() => setAddMemberOpen(true)}
@@ -1414,7 +1328,7 @@ export const SimpleChatView: React.FC = () => {
                 <span>Invite New Member</span>
               </button>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 ml-auto">
                 <button
                   type="button"
                   onClick={() => setMembersModalOpen(false)}
@@ -1440,8 +1354,8 @@ export const SimpleChatView: React.FC = () => {
 
       {/* Simple E2EE Verification Modal */}
       {safetyModalOpen && (
-        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md p-6 space-y-4">
+        <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-md p-5 sm:p-6 space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2.5">
                 <ShieldCheck className="w-5 h-5 text-emerald-600" />

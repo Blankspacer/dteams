@@ -14,9 +14,12 @@ import {
   CheckCircle2,
   Search,
   MessageSquare,
-  AlertTriangle,
+  Phone,
+  Video,
+  Loader2,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
+import { useEmailSearchMatch } from '../../hooks/useEmailSearchMatch';
 import { TeamInvite } from '../../types';
 import { UserStatusBadge } from './UserStatusBadge';
 import {
@@ -24,12 +27,12 @@ import {
   getEffectiveUserStatus,
   sortUsersByPresence,
 } from '../../utils/presence';
+import { matchesUserSearch } from '../../utils/userLookup';
 
 interface AddMemberModalProps {
   isOpen: boolean;
   onClose: () => void;
   initialTab?: 'available' | 'invite';
-  welcomeMode?: boolean;
   onStartedChat?: () => void;
 }
 
@@ -37,26 +40,25 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
   isOpen,
   onClose,
   initialTab = 'available',
-  welcomeMode = false,
   onStartedChat,
 }) => {
   const {
     firebaseUser,
     currentProfile,
     teamUsers,
-    contacts,
-    teamInvites,
-    inviteTeamMember,
     addContact,
-    addContactsAndStartChat,
+    isAddedMember,
+    inviteTeamMember,
     startDirectChat,
+    startVideoCall,
+    openCreateGroupModal,
     presenceNow,
   } = useApp();
 
   const [tab, setTab] = useState<'available' | 'invite'>(initialTab);
   const [participantSearch, setParticipantSearch] = useState('');
-  const [selectedUids, setSelectedUids] = useState<string[]>([]);
-  const [addingSelected, setAddingSelected] = useState(false);
+  const [busyUid, setBusyUid] = useState<string | null>(null);
+  const { matchedEmailUser, searchingEmail, searchedEmail } = useEmailSearchMatch(participantSearch);
 
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -71,15 +73,11 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
     if (isOpen) {
       setTab(initialTab);
       setParticipantSearch('');
-      setSelectedUids([]);
       setError(null);
     }
   }, [isOpen, initialTab]);
 
   if (!isOpen) return null;
-
-  // Strictly track ONLY contacts the user explicitly added to their app
-  const addedUidSet = new Set<string>(contacts.map((c) => c.uid));
 
   const otherUsers = sortUsersByPresence(
     teamUsers.filter((u) => u.uid !== firebaseUser?.uid),
@@ -87,31 +85,9 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
     presenceNow
   );
 
-  const hasAddedOrInvited =
-    contacts.length > 0 ||
-    teamInvites.some((inv) => inv.invitedByUid === firebaseUser?.uid);
-  const mustAddBeforeEntering =
-    welcomeMode && !hasAddedOrInvited && otherUsers.length > 0;
-
-  const cleanSearch = participantSearch.trim().toLowerCase().replace(/^@+/, '');
-  const hasActiveSearch = cleanSearch.length >= 2;
-
-  const addedUsersList = otherUsers.filter((u) => addedUidSet.has(u.uid));
-
-  const searchMatches = hasActiveSearch
-    ? otherUsers.filter((u) => {
-        const uname = (u.username || '').toLowerCase();
-        const dname = u.displayName.toLowerCase();
-        const ttl = (u.title || '').toLowerCase();
-        const dept = (u.department || '').toLowerCase();
-        return (
-          uname.includes(cleanSearch) ||
-          dname.includes(cleanSearch) ||
-          ttl.includes(cleanSearch) ||
-          dept.includes(cleanSearch)
-        );
-      })
-    : addedUsersList;
+  const filteredUsers = otherUsers.filter((u) =>
+    matchesUserSearch(u, participantSearch, matchedEmailUser?.uid)
+  );
 
   const resetForm = () => {
     setName('');
@@ -124,50 +100,29 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
   };
 
   const handleClose = () => {
-    if (mustAddBeforeEntering) {
-      setError('Please add at least 1 user or invite a team member before entering your workspace.');
-      return;
-    }
     resetForm();
     onClose();
   };
 
-  const toggleSelectUid = (uid: string) => {
-    setSelectedUids((prev) =>
-      prev.includes(uid) ? prev.filter((id) => id !== uid) : [...prev, uid]
-    );
-  };
-
-  const handleAddOnly = async (uid: string) => {
+  const handleAddMember = async (uid: string) => {
     setError(null);
-    setAddingSelected(true);
+    setBusyUid(uid);
     try {
       await addContact(uid);
-      setSelectedUids((prev) => prev.filter((id) => id !== uid));
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not add user.');
+      setError(err instanceof Error ? err.message : 'Could not add member.');
     } finally {
-      setAddingSelected(false);
+      setBusyUid(null);
     }
   };
 
-  const handleAddSingleAndChat = async (uid: string) => {
-    setError(null);
-    setAddingSelected(true);
-    try {
-      await addContactsAndStartChat([uid]);
-      onStartedChat?.();
-      handleClose();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not add user.');
-    } finally {
-      setAddingSelected(false);
+  const handleOpenChat = async (uid: string) => {
+    if (!isAddedMember(uid)) {
+      setError('Please add this user as a member first before sending messages.');
+      return;
     }
-  };
-
-  const handleOpenExistingChat = async (uid: string) => {
     setError(null);
-    setAddingSelected(true);
+    setBusyUid(uid);
     try {
       await startDirectChat(uid);
       onStartedChat?.();
@@ -175,22 +130,29 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not open chat.');
     } finally {
-      setAddingSelected(false);
+      setBusyUid(null);
     }
   };
 
-  const handleAddSelectedAndChat = async () => {
-    if (selectedUids.length === 0 || addingSelected) return;
+  const handleStartCall = async (uid: string, displayName: string, mode: 'voice' | 'video') => {
+    if (!firebaseUser) return;
+    if (!isAddedMember(uid)) {
+      setError('Please add this user as a member first before calling or video calling them.');
+      return;
+    }
     setError(null);
-    setAddingSelected(true);
+    setBusyUid(uid);
     try {
-      await addContactsAndStartChat(selectedUids);
-      onStartedChat?.();
+      await startVideoCall(
+        mode === 'voice' ? `Voice Call with ${displayName}` : `Call with ${displayName}`,
+        [firebaseUser.uid, uid],
+        mode
+      );
       handleClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not add users.');
+      setError(err instanceof Error ? err.message : 'Could not start call.');
     } finally {
-      setAddingSelected(false);
+      setBusyUid(null);
     }
   };
 
@@ -199,7 +161,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
     setError(null);
 
     if (!name.trim()) {
-      setError('Please enter the team member name.');
+      setError('Please enter the person’s name.');
       return;
     }
     if (!email.trim() || !email.includes('@')) {
@@ -219,7 +181,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
         setCreatedInvite(result);
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not add team member.');
+      setError(err instanceof Error ? err.message : 'Could not send invite.');
     } finally {
       setSubmitting(false);
     }
@@ -230,7 +192,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
 
   const handleCopyInvite = () => {
     const inviteText = createdInvite
-      ? `Hi ${createdInvite.name}, download SphereCall and join our team workspace here: ${mobileDownloadUrl} (sign in with ${createdInvite.email})`
+      ? `Hi ${createdInvite.name}, join me on SphereCall here: ${mobileDownloadUrl} (sign in with ${createdInvite.email})`
       : mobileDownloadUrl;
     navigator.clipboard.writeText(inviteText);
     setCopied(true);
@@ -239,17 +201,17 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
 
   const mailtoHref = createdInvite
     ? `mailto:${encodeURIComponent(createdInvite.email)}?subject=${encodeURIComponent(
-        `${currentProfile?.displayName || 'Your teammate'} invited you to SphereCall`
+        `${currentProfile?.displayName || 'Someone'} invited you to SphereCall`
       )}&body=${encodeURIComponent(
-        `Hi ${createdInvite.name},\n\nYou've been added to our team workspace on SphereCall.\n\nDownload & install the app or open it in your browser:\n${mobileDownloadUrl}\n\nSign in with Gmail or register with ${createdInvite.email} to chat, call, and share files.\n`
+        `Hi ${createdInvite.name},\n\nJoin SphereCall to chat, voice call, video call, and schedule meetings together.\n\nOpen or install the app:\n${mobileDownloadUrl}\n\nSign in with Gmail or your ${createdInvite.email} account.\n`
       )}`
     : '#';
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-lg max-h-[90dvh] flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3 shrink-0">
+        <div className="px-4 sm:px-6 py-4 border-b border-slate-200 flex items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
               {tab === 'available' ? (
@@ -260,31 +222,25 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
             </div>
             <div className="min-w-0">
               <h3 className="text-base font-bold text-slate-900 truncate">
-                {welcomeMode
-                  ? 'First-Login Setup: Add Team Members'
-                  : 'Find & Add Users'}
+                People &amp; Invites
               </h3>
               <p className="text-[11px] text-slate-500 truncate">
-                {welcomeMode
-                  ? 'Manually search and add users or invite a teammate to get started.'
-                  : 'Search by @username or full name to add users and see their live status.'}
+                See all SphereCall users. Add someone as a member to message or call them.
               </p>
             </div>
           </div>
-          {!mustAddBeforeEntering && (
-            <button
-              type="button"
-              onClick={handleClose}
-              className="min-h-[36px] min-w-[36px] flex items-center justify-center text-slate-400 hover:text-slate-700 shrink-0"
-              aria-label="Close"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          )}
+          <button
+            type="button"
+            onClick={handleClose}
+            className="min-h-[40px] min-w-[40px] flex items-center justify-center text-slate-400 hover:text-slate-700 shrink-0"
+            aria-label="Close"
+          >
+            <X className="w-5 h-5" />
+          </button>
         </div>
 
         {/* Tab Switcher */}
-        <div className="px-6 pt-3 pb-2 border-b border-slate-100 bg-slate-50/70 shrink-0">
+        <div className="px-4 sm:px-6 pt-3 pb-2 border-b border-slate-100 bg-slate-50/70 shrink-0">
           <div className="grid grid-cols-2 gap-1.5 bg-slate-200/70 p-1 rounded-xl">
             <button
               type="button"
@@ -292,14 +248,15 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                 setError(null);
                 setTab('available');
               }}
-              className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+              className={`min-h-[38px] px-2.5 sm:px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
                 tab === 'available'
                   ? 'bg-white text-slate-900 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <Search className="w-3.5 h-3.5 text-sky-600" />
-              <span>Find by @username ({addedUsersList.length} added)</span>
+              <Users className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+              <span className="sm:hidden truncate">Users ({otherUsers.length})</span>
+              <span className="hidden sm:inline truncate">Platform Users ({otherUsers.length})</span>
             </button>
             <button
               type="button"
@@ -307,14 +264,14 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                 setError(null);
                 setTab('invite');
               }}
-              className={`min-h-[36px] px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+              className={`min-h-[38px] px-2.5 sm:px-3 rounded-lg text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
                 tab === 'invite'
                   ? 'bg-white text-slate-900 shadow-xs'
                   : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <UserPlus className="w-3.5 h-3.5 text-sky-600" />
-              <span>Invite New Member</span>
+              <UserPlus className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+              <span className="truncate">Invite by Email</span>
             </button>
           </div>
         </div>
@@ -322,22 +279,11 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
         {/* Body */}
         {tab === 'available' ? (
           <>
-            <div className="p-5 sm:p-6 space-y-3.5 overflow-y-auto flex-1">
+            <div className="p-4 sm:p-6 space-y-3.5 overflow-y-auto flex-1">
               {error && (
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>{error}</span>
-                </div>
-              )}
-
-              {welcomeMode && !hasAddedOrInvited && (
-                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2">
-                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                  <span>
-                    {otherUsers.length > 0
-                      ? 'First-time login requires adding at least 1 user or sending a team invite manually. Type a @username or name below to add teammates.'
-                      : 'No other users have signed up yet. Send an invite by email or continue to set up your workspace.'}
-                  </span>
                 </div>
               )}
 
@@ -347,20 +293,23 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                   type="text"
                   value={participantSearch}
                   onChange={(e) => setParticipantSearch(e.target.value)}
-                  placeholder="Enter @username or full name (min 2 chars)..."
-                  className="w-full min-h-[42px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
+                  placeholder="Find by name, @username, or @email..."
+                  className="w-full min-h-[42px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-9 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
                 />
+                {searchingEmail && (
+                  <Loader2 className="w-4 h-4 text-sky-600 animate-spin absolute right-3 top-3" />
+                )}
               </div>
 
-              {!hasActiveSearch && addedUsersList.length === 0 ? (
+              {otherUsers.length === 0 ? (
                 <div className="p-6 border border-dashed border-slate-200 rounded-xl text-center space-y-3">
                   <Users className="w-8 h-8 text-slate-300 mx-auto" />
                   <div className="space-y-1">
                     <p className="text-xs font-semibold text-slate-800">
-                      Search to add users to your app
+                      No other users have joined yet
                     </p>
                     <p className="text-xs text-slate-500 max-w-sm mx-auto leading-relaxed">
-                      Other users stay hidden until you add them. Type at least 2 characters of a user&apos;s <span className="font-semibold text-slate-700">@username</span> or name above, or invite someone new by email.
+                      Invite friends or teammates by email so they appear here automatically once they sign in.
                     </p>
                   </div>
                   <button
@@ -369,62 +318,73 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                     className="min-h-[40px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold inline-flex items-center gap-1.5"
                   >
                     <UserPlus className="w-4 h-4" />
-                    <span>Invite Member by Email</span>
+                    <span>Invite by Email</span>
                   </button>
                 </div>
-              ) : searchMatches.length === 0 ? (
-                <div className="p-6 text-center space-y-2 border border-dashed border-slate-200 rounded-xl">
+              ) : filteredUsers.length === 0 ? (
+                <div className="p-6 text-center space-y-2.5 border border-dashed border-slate-200 rounded-xl">
                   <p className="text-xs font-semibold text-slate-700">
-                    No users match &ldquo;{participantSearch}&rdquo;.
+                    {searchingEmail
+                      ? `Searching for ${searchedEmail || participantSearch}...`
+                      : searchedEmail
+                      ? `No registered user found for ${searchedEmail}.`
+                      : `No users match "${participantSearch}".`}
                   </p>
                   <p className="text-[11px] text-slate-500">
-                    Check their @username spelling or invite them by email so they can join SphereCall.
+                    Try another name, @username, or @email — or invite them to join SphereCall.
                   </p>
+                  {searchedEmail && !searchingEmail && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setEmail(searchedEmail);
+                        setTab('invite');
+                      }}
+                      className="min-h-[36px] px-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold inline-flex items-center gap-1.5"
+                    >
+                      <UserPlus className="w-3.5 h-3.5" />
+                      <span>Invite {searchedEmail}</span>
+                    </button>
+                  )}
                 </div>
               ) : (
                 <div className="space-y-1.5">
-                  <div className="text-[11px] font-semibold text-slate-500 px-1">
-                    {hasActiveSearch
-                      ? `Search Results (${searchMatches.length})`
-                      : `Your Added Users (${addedUsersList.length})`}
+                  <div className="text-[11px] font-semibold text-slate-500 px-1 flex items-center justify-between gap-2">
+                    <span>
+                      Showing {filteredUsers.length} {filteredUsers.length === 1 ? 'user' : 'users'}
+                    </span>
+                    {matchedEmailUser && (
+                      <span className="text-emerald-700 font-semibold">
+                        Found by email: {matchedEmailUser.displayName}
+                      </span>
+                    )}
                   </div>
                   <div className="border border-slate-200 rounded-xl divide-y divide-slate-100 max-h-72 overflow-y-auto">
-                    {searchMatches.map((member) => {
-                      const isAdded = addedUidSet.has(member.uid);
-                      const isSelected = selectedUids.includes(member.uid);
+                    {filteredUsers.map((member) => {
                       const effectiveStatus = getEffectiveUserStatus(
                         member,
                         firebaseUser?.uid,
                         presenceNow
                       );
                       const meta = STATUS_META[effectiveStatus];
+                      const isBusy = busyUid === member.uid;
+                      const isMember = isAddedMember(member.uid);
 
                       return (
                         <div
                           key={member.uid}
-                          className={`px-3.5 py-2.5 flex items-center justify-between gap-2.5 transition-colors ${
-                            isSelected ? 'bg-sky-50/70' : 'hover:bg-slate-50'
-                          }`}
+                          className="px-3.5 py-2.5 flex items-center justify-between gap-2.5 hover:bg-slate-50 transition-colors"
                         >
-                          <button
-                            type="button"
-                            onClick={() =>
-                              isAdded ? handleOpenExistingChat(member.uid) : toggleSelectUid(member.uid)
-                            }
-                            className="flex-1 min-w-0 flex items-center gap-3 text-left"
+                          <div
+                            onClick={() => {
+                              if (isMember && !isBusy) {
+                                handleOpenChat(member.uid);
+                              }
+                            }}
+                            className={`flex-1 min-w-0 flex items-center gap-3 text-left ${
+                              isMember ? 'cursor-pointer' : ''
+                            }`}
                           >
-                            {!isAdded && (
-                              <div
-                                className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 transition-colors ${
-                                  isSelected
-                                    ? 'bg-sky-600 border-sky-600 text-white'
-                                    : 'border-slate-300 bg-white'
-                                }`}
-                              >
-                                {isSelected && <Check className="w-3.5 h-3.5" />}
-                              </div>
-                            )}
-
                             <div className="relative shrink-0">
                               {member.avatar ? (
                                 <img
@@ -438,12 +398,10 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                                   {member.displayName.slice(0, 2).toUpperCase()}
                                 </div>
                               )}
-                              {isAdded && (
-                                <span
-                                  className={`w-2.5 h-2.5 rounded-full border-2 border-white absolute bottom-0 right-0 ${meta.dotClass}`}
-                                  title={meta.label}
-                                />
-                              )}
+                              <span
+                                className={`w-2.5 h-2.5 rounded-full border-2 border-white absolute bottom-0 right-0 ${meta.dotClass}`}
+                                title={meta.label}
+                              />
                             </div>
 
                             <div className="min-w-0 flex-1">
@@ -454,18 +412,9 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                                     @{member.username}
                                   </span>
                                 )}
-                                {isAdded && (
-                                  <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded shrink-0">
-                                    Added
-                                  </span>
-                                )}
                               </div>
                               <div className="text-[11px] text-slate-500 truncate flex items-center gap-1.5 mt-0.5">
-                                {isAdded ? (
-                                  <UserStatusBadge status={effectiveStatus} compact />
-                                ) : (
-                                  <span>Click Add to save to your contacts</span>
-                                )}
+                                <UserStatusBadge status={effectiveStatus} compact />
                                 {(member.title || member.department) && (
                                   <span className="truncate">
                                     · {[member.title, member.department].filter(Boolean).join(' · ')}
@@ -473,40 +422,77 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                                 )}
                               </div>
                             </div>
-                          </button>
+                          </div>
 
-                          {isAdded ? (
-                            <button
-                              type="button"
-                              disabled={addingSelected}
-                              onClick={() => handleOpenExistingChat(member.uid)}
-                              className="min-h-[34px] px-3 rounded-lg border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold flex items-center gap-1.5 shrink-0"
-                            >
-                              <MessageSquare className="w-3.5 h-3.5 text-sky-600" />
-                              <span>Chat</span>
-                            </button>
-                          ) : (
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                type="button"
-                                disabled={addingSelected}
-                                onClick={() => handleAddOnly(member.uid)}
-                                className="min-h-[34px] px-2.5 rounded-lg border border-sky-200 bg-sky-50 hover:bg-sky-100 disabled:opacity-60 text-sky-700 text-xs font-semibold flex items-center gap-1 shrink-0"
-                              >
-                                <UserPlus className="w-3.5 h-3.5" />
-                                <span>Add</span>
-                              </button>
-                              <button
-                                type="button"
-                                disabled={addingSelected}
-                                onClick={() => handleAddSingleAndChat(member.uid)}
-                                className="min-h-[34px] px-2.5 rounded-lg bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1 shrink-0"
-                              >
-                                <MessageSquare className="w-3.5 h-3.5" />
-                                <span>Chat</span>
-                              </button>
-                            </div>
-                          )}
+                          <div className="flex items-center gap-1.5 shrink-0">
+                            {isMember ? (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleStartCall(member.uid, member.displayName, 'voice')}
+                                  className="min-h-[34px] min-w-[34px] rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 flex items-center justify-center"
+                                  title={`Voice call ${member.displayName}`}
+                                  aria-label={`Voice call ${member.displayName}`}
+                                >
+                                  <Phone className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleStartCall(member.uid, member.displayName, 'video')}
+                                  className="min-h-[34px] min-w-[34px] rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 flex items-center justify-center"
+                                  title={`Video call ${member.displayName}`}
+                                  aria-label={`Video call ${member.displayName}`}
+                                >
+                                  <Video className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleOpenChat(member.uid)}
+                                  className="min-h-[34px] px-2.5 rounded-lg bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1"
+                                >
+                                  <MessageSquare className="w-3.5 h-3.5" />
+                                  <span>Chat</span>
+                                </button>
+                              </>
+                            ) : (
+                              <>
+                                <button
+                                  type="button"
+                                  disabled
+                                  title="Add as member first to call"
+                                  aria-label="Add as member first to call"
+                                  className="min-h-[34px] min-w-[34px] rounded-lg bg-slate-100 text-slate-400 hidden sm:flex items-center justify-center cursor-not-allowed"
+                                >
+                                  <Phone className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled
+                                  title="Add as member first to video call"
+                                  aria-label="Add as member first to video call"
+                                  className="min-h-[34px] min-w-[34px] rounded-lg bg-slate-100 text-slate-400 hidden sm:flex items-center justify-center cursor-not-allowed"
+                                >
+                                  <Video className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleAddMember(member.uid)}
+                                  className="min-h-[36px] sm:min-h-[34px] px-2.5 rounded-lg bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1"
+                                >
+                                  {isBusy ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                  ) : (
+                                    <UserPlus className="w-3.5 h-3.5" />
+                                  )}
+                                  <span>Add Member</span>
+                                </button>
+                              </>
+                            )}
+                          </div>
                         </div>
                       );
                     })}
@@ -515,57 +501,40 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
               )}
             </div>
 
-            <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between gap-2.5 shrink-0">
-              {mustAddBeforeEntering ? (
-                <span className="text-[11px] font-semibold text-amber-700">
-                  Add 1+ user or invite a member to continue
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={handleClose}
-                  className={`min-h-[40px] px-4 rounded-xl text-xs font-semibold ${
-                    welcomeMode && hasAddedOrInvited
-                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
-                      : 'border border-slate-200 bg-white hover:bg-slate-100 text-slate-700'
-                  }`}
-                >
-                  {welcomeMode
-                    ? addedUsersList.length > 0
-                      ? `Continue to Workspace (${addedUsersList.length} added)`
-                      : 'Continue to Workspace'
-                    : 'Close'}
-                </button>
-              )}
+            <div className="px-4 sm:px-6 py-4 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2.5 shrink-0">
+              <button
+                type="button"
+                onClick={handleClose}
+                className="min-h-[40px] px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold"
+              >
+                Close
+              </button>
 
-              {selectedUids.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-2 ml-auto">
                 <button
                   type="button"
-                  disabled={addingSelected}
-                  onClick={handleAddSelectedAndChat}
-                  className="min-h-[40px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5"
+                  onClick={() => {
+                    handleClose();
+                    openCreateGroupModal();
+                  }}
+                  className="min-h-[40px] px-3 sm:px-3.5 rounded-xl border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-800 text-xs font-semibold flex items-center gap-1.5"
                 >
-                  <MessageSquare className="w-4 h-4" />
-                  <span>
-                    {addingSelected
-                      ? 'Adding...'
-                      : `Add (${selectedUids.length}) & Chat`}
-                  </span>
+                  <Users className="w-4 h-4 text-sky-600" />
+                  <span>Create Group</span>
                 </button>
-              ) : (
                 <button
                   type="button"
                   onClick={() => setTab('invite')}
-                  className="min-h-[40px] px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5"
+                  className="min-h-[40px] px-3.5 sm:px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-1.5"
                 >
                   <UserPlus className="w-4 h-4" />
-                  <span>Invite by Email</span>
+                  <span>Invite</span>
                 </button>
-              )}
+              </div>
             </div>
           </>
         ) : createdInvite ? (
-          <div className="p-6 space-y-5 overflow-y-auto">
+          <div className="p-4 sm:p-6 space-y-5 overflow-y-auto">
             <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 flex items-start gap-3">
               <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
               <div className="space-y-1">
@@ -573,8 +542,8 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                   {createdInvite.name} added to invites
                 </div>
                 <p className="text-xs text-emerald-800 leading-relaxed">
-                  Share the workspace link below. Once they register with{' '}
-                  <span className="font-semibold">{createdInvite.email}</span>, search their name or @username in Find &amp; Add User to add them to your contacts.
+                  Share the workspace link below. As soon as they sign in with{' '}
+                  <span className="font-semibold">{createdInvite.email}</span>, they will appear automatically in your people list.
                 </p>
               </div>
             </div>
@@ -604,7 +573,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                 onClick={resetForm}
                 className="min-h-[40px] px-3 text-xs font-semibold text-sky-600 hover:text-sky-700"
               >
-                + Invite another member
+                + Invite another person
               </button>
               <button
                 type="button"
@@ -616,7 +585,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
             </div>
           </div>
         ) : (
-          <form onSubmit={handleSubmitInvite} className="p-6 space-y-4 overflow-y-auto">
+          <form onSubmit={handleSubmitInvite} className="p-4 sm:p-6 space-y-4 overflow-y-auto">
             <p className="text-xs text-slate-500">
               Someone not registered on SphereCall yet? Send them an invite to join.
             </p>
@@ -664,7 +633,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Job Title (optional)
@@ -714,7 +683,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                 className="min-h-[42px] px-5 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5"
               >
                 <UserPlus className="w-4 h-4" />
-                <span>{submitting ? 'Adding...' : 'Send Invite'}</span>
+                <span>{submitting ? 'Sending...' : 'Send Invite'}</span>
               </button>
             </div>
           </form>

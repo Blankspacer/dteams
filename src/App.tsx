@@ -18,9 +18,9 @@ import { SimpleTranscriptsView } from './components/transcripts/SimpleTranscript
 import { SimpleAccountView } from './components/account/SimpleAccountView';
 import { OfflineIndicator } from './components/common/OfflineIndicator';
 import { MobileDownloadModal } from './components/common/MobileDownloadModal';
-import { AddMemberModal } from './components/common/AddMemberModal';
 import { IncomingCallOverlay } from './components/common/IncomingCallOverlay';
 import { MeetingReminderOverlay } from './components/common/MeetingReminderOverlay';
+import { CreateGroupModal } from './components/common/CreateGroupModal';
 import { sounds } from './utils/audio';
 
 interface ErrorBoundaryState {
@@ -76,8 +76,6 @@ function MainAppShell() {
     authLoading,
     activeTab,
     setActiveTab,
-    isFirstLogin,
-    dismissFirstLoginPrompt,
     errorBanner,
     setErrorBanner,
   } = useApp();
@@ -111,7 +109,7 @@ function MainAppShell() {
 
   if (authLoading) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+      <div className="min-h-[100dvh] bg-slate-50 flex items-center justify-center">
         <div className="flex flex-col items-center gap-3 text-slate-500">
           <Loader2 className="w-7 h-7 animate-spin text-sky-600" />
           <span className="text-xs font-medium">Loading SphereCall...</span>
@@ -131,18 +129,18 @@ function MainAppShell() {
   }
 
   return (
-    <div className="h-screen bg-slate-50 text-slate-900 flex flex-col overflow-hidden">
+    <div className="h-[100dvh] w-full max-w-full bg-slate-50 text-slate-900 flex flex-col overflow-hidden">
       <TopNav />
 
       {errorBanner && (
-        <div className="bg-rose-50 border-b border-rose-200 px-4 py-2 text-xs text-rose-700 flex items-center justify-between gap-3 shrink-0">
-          <div className="flex items-center gap-2 min-w-0">
-            <AlertCircle className="w-4 h-4 shrink-0" />
-            <span className="truncate">{errorBanner}</span>
+        <div className="bg-rose-50 border-b border-rose-200 px-3 sm:px-4 py-2 text-xs text-rose-700 flex items-center justify-between gap-2 shrink-0">
+          <div className="flex items-start sm:items-center gap-2 min-w-0">
+            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 sm:mt-0" />
+            <span className="line-clamp-2 sm:line-clamp-none break-words">{errorBanner}</span>
           </div>
           <button
             onClick={() => setErrorBanner(null)}
-            className="p-1 text-rose-600 hover:text-rose-900 shrink-0"
+            className="min-h-[36px] min-w-[36px] flex items-center justify-center text-rose-600 hover:text-rose-900 shrink-0"
             aria-label="Dismiss error"
           >
             <X className="w-4 h-4" />
@@ -150,7 +148,7 @@ function MainAppShell() {
         </div>
       )}
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 min-h-0 flex overflow-hidden pb-[calc(4rem+env(safe-area-inset-bottom))] md:pb-0">
         {activeTab === 'chat' && <SimpleChatView />}
         {activeTab === 'video' && <SimpleVideoView />}
         {activeTab === 'calendar' && <SimpleCalendarView />}
@@ -158,22 +156,13 @@ function MainAppShell() {
         {activeTab === 'account' && <SimpleAccountView />}
       </div>
 
-      <Footer className="mb-16 md:mb-0" />
+      <Footer className="hidden md:block" />
       <BottomNav />
       <MeetingReminderOverlay />
       <IncomingCallOverlay />
+      <CreateGroupModal />
       <OfflineIndicator />
       <MobileDownloadModal isOpen={downloadModalOpen} onClose={closeDownloadModal} />
-      <AddMemberModal
-        isOpen={isFirstLogin}
-        onClose={dismissFirstLoginPrompt}
-        initialTab="available"
-        welcomeMode={true}
-        onStartedChat={() => {
-          setActiveTab('chat');
-          dismissFirstLoginPrompt();
-        }}
-      />
     </div>
   );
 }

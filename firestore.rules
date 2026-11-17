@@ -19,6 +19,10 @@ service cloud.firestore {
       return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
     }
 
+    function isValidSha256Hex(id) {
+      return id is string && id.size() == 64 && id.matches('^[a-f0-9]{64}$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -31,6 +35,13 @@ service cloud.firestore {
       return isVerifiedUser() && (
         exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
         request.auth.token.email == 'sneloy@gmail.com'
+      );
+    }
+
+    function hasAddedDirectContact(pair) {
+      return pair.size() == 2 && (
+        (pair[0] == request.auth.uid && exists(/databases/$(database)/documents/users/$(request.auth.uid)/contacts/$(pair[1]))) ||
+        (pair[1] == request.auth.uid && exists(/databases/$(database)/documents/users/$(request.auth.uid)/contacts/$(pair[0])))
       );
     }
 
@@ -84,6 +95,16 @@ service cloud.firestore {
         data.addedByUid is string && data.addedByUid == userId && isValidId(data.addedByUid) &&
         data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
         data.createdAt is timestamp;
+    }
+
+    function isValidEmailLookup(data) {
+      return data.keys().hasAll(['uid', 'displayName', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'displayName', 'username', 'createdAt', 'updatedAt']) &&
+        data.uid is string && isValidId(data.uid) &&
+        data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+        (!('username' in data) || (data.username is string && data.username.size() >= 3 && data.username.size() <= 30 && data.username.matches('^[a-z0-9_.-]+$'))) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
     }
 
     function isValidConversation(data) {
@@ -292,6 +313,27 @@ service cloud.firestore {
       }
     }
 
+    // 2b. Privacy-preserving exact-match email lookup (SHA-256 hash doc IDs, zero PII, list disabled)
+    match /email_lookup/{emailHash} {
+      allow get: if isVerifiedUser() && isValidSha256Hex(emailHash);
+      allow list: if false;
+      allow create: if isVerifiedUser() && isValidSha256Hex(emailHash) &&
+        isValidEmailLookup(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isVerifiedUser() && isValidSha256Hex(emailHash) &&
+        isValidEmailLookup(incoming()) &&
+        existing().uid == request.auth.uid &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'username', 'updatedAt']);
+      allow delete: if isVerifiedUser() && isValidSha256Hex(emailHash) && (
+        existing().uid == request.auth.uid || isAdmin()
+      );
+    }
+
     // 3. Conversations (Channels, Groups, and Direct Messages)
     match /conversations/{conversationId} {
       allow get: if isVerifiedUser() && isValidId(conversationId) && (
@@ -309,6 +351,7 @@ service cloud.firestore {
         isValidConversation(incoming()) &&
         incoming().ownerId == request.auth.uid &&
         request.auth.uid in incoming().participantIds &&
+        (incoming().type != 'direct' || hasAddedDirectContact(incoming().participantIds)) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isVerifiedUser() && isValidId(conversationId) &&
@@ -318,6 +361,7 @@ service cloud.firestore {
         incoming().updatedAt == request.time && (
           isAdmin() || (
             (existing().isPublic == true || request.auth.uid in existing().participantIds) &&
+            (existing().type != 'direct' || hasAddedDirectContact(existing().participantIds)) &&
             incoming().diff(existing()).affectedKeys().hasOnly(['lastMessageText', 'lastMessageSender', 'updatedAt'])
           ) || (
             existing().isPublic == true &&
@@ -355,6 +399,10 @@ service cloud.firestore {
           exists(/databases/$(database)/documents/conversations/$(conversationId)) && (
             get(/databases/$(database)/documents/conversations/$(conversationId)).data.isPublic == true ||
             request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds
+          ) &&
+          (
+            get(/databases/$(database)/documents/conversations/$(conversationId)).data.type != 'direct' ||
+            hasAddedDirectContact(get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds)
           ) &&
           incoming().isPublic == get(/databases/$(database)/documents/conversations/$(conversationId)).data.isPublic &&
           incoming().participantIds == get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
@@ -398,6 +446,11 @@ service cloud.firestore {
         isValidMeeting(incoming()) &&
         incoming().organizerId == request.auth.uid &&
         request.auth.uid in incoming().participantIds &&
+        (
+          incoming().isPublic == true ||
+          incoming().participantIds.size() != 2 ||
+          hasAddedDirectContact(incoming().participantIds)
+        ) &&
         incoming().createdAt == request.time &&
         incoming().updatedAt == request.time;
       allow update: if isVerifiedUser() && isValidId(meetingId) &&

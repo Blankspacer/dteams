@@ -20,14 +20,17 @@ import {
   Volume2,
   Globe,
   AtSign,
-  UserMinus,
+  Users,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useMeetingNotifications } from '../../context/NotificationContext';
+import { useEmailSearchMatch } from '../../hooks/useEmailSearchMatch';
+import { matchesUserSearch } from '../../utils/userLookup';
 import { AddMemberModal } from '../common/AddMemberModal';
 import { MobileDownloadModal } from '../common/MobileDownloadModal';
 import { PWAInstallButton } from '../common/PWAInstallButton';
 import { UserStatusBadge } from '../common/UserStatusBadge';
+import { Footer } from '../layout/Footer';
 import { usePWAInstall } from '../../hooks/usePWAInstall';
 import { UserStatus } from '../../types';
 import { compressAvatarImage } from '../../utils/avatar';
@@ -45,16 +48,17 @@ export const SimpleAccountView: React.FC = () => {
     firebaseUser,
     currentProfile,
     teamUsers,
-    contacts,
     teamInvites,
     selectedTimezone,
     setSelectedTimezone,
     updateMyProfile,
     updateMemberPermissions,
-    removeContact,
+    addContact,
+    isAddedMember,
     startDirectChat,
     startVideoCall,
     removeTeamInvite,
+    openCreateGroupModal,
     signOut,
     presenceNow,
   } = useApp();
@@ -74,6 +78,7 @@ export const SimpleAccountView: React.FC = () => {
   const [loggingOut, setLoggingOut] = useState(false);
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | UserStatus>('all');
+  const [addingUid, setAddingUid] = useState<string | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [downloadModalOpen, setDownloadModalOpen] = useState(false);
@@ -190,9 +195,8 @@ export const SimpleAccountView: React.FC = () => {
     setTimeout(() => setCopiedLink(false), 2500);
   };
 
-  const addedUidSet = new Set<string>(contacts.map((c) => c.uid));
   const visibleDirectoryUsers = sortUsersByPresence(
-    teamUsers.filter((u) => u.uid === firebaseUser?.uid || addedUidSet.has(u.uid)),
+    teamUsers,
     firebaseUser?.uid,
     presenceNow
   );
@@ -202,14 +206,10 @@ export const SimpleAccountView: React.FC = () => {
     presenceNow
   );
 
-  const cleanSearch = search.trim().toLowerCase().replace(/^@/, '');
+  const { matchedEmailUser, searchingEmail, searchedEmail } = useEmailSearchMatch(search);
+
   const filteredTeam = visibleDirectoryUsers.filter((u) => {
-    const matchesSearch =
-      !cleanSearch ||
-      u.displayName.toLowerCase().includes(cleanSearch) ||
-      (u.username || '').toLowerCase().includes(cleanSearch) ||
-      (u.title || '').toLowerCase().includes(cleanSearch) ||
-      (u.department || '').toLowerCase().includes(cleanSearch);
+    const matchesSearch = matchesUserSearch(u, search, matchedEmailUser?.uid);
     const matchesStatus =
       statusFilter === 'all' ||
       getEffectiveUserStatus(u, firebaseUser?.uid, presenceNow) === statusFilter;
@@ -217,13 +217,13 @@ export const SimpleAccountView: React.FC = () => {
   });
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50 p-4 sm:p-6">
-      <div className="max-w-5xl mx-auto space-y-6">
+    <div className="flex-1 overflow-y-auto bg-slate-50 p-3.5 sm:p-6">
+      <div className="max-w-5xl mx-auto space-y-5 sm:space-y-6">
         {/* Top Grid: User Account + E2EE & Invite */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 sm:gap-6">
           {/* Account Settings Card */}
-          <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-5">
-            <div className="flex items-start justify-between gap-4">
+          <div className="lg:col-span-7 bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-5">
+            <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4">
               <div className="flex items-center gap-3.5 min-w-0">
                 <input
                   ref={avatarInputRef}
@@ -306,7 +306,7 @@ export const SimpleAccountView: React.FC = () => {
                 type="button"
                 onClick={handleLogout}
                 disabled={loggingOut}
-                className="min-h-[40px] px-3.5 rounded-xl border border-slate-200 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-700 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors shrink-0 disabled:opacity-60"
+                className="min-h-[42px] px-4 rounded-xl border border-rose-200 bg-rose-50/70 hover:bg-rose-100 text-rose-700 sm:border-slate-200 sm:bg-white sm:hover:bg-rose-50 sm:hover:border-rose-200 sm:hover:text-rose-700 sm:text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors shrink-0 w-full sm:w-auto disabled:opacity-60"
               >
                 <LogOut className="w-4 h-4" />
                 <span>{loggingOut ? 'Logging out...' : 'Log Out'}</span>
@@ -468,7 +468,7 @@ export const SimpleAccountView: React.FC = () => {
                   readOnly
                   value={downloadLink}
                   onFocus={(e) => e.target.select()}
-                  className="flex-1 min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl px-3 text-xs font-mono text-slate-700"
+                  className="flex-1 min-w-0 min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl px-3 text-xs font-mono text-slate-700"
                 />
                 <button
                   type="button"
@@ -495,18 +495,29 @@ export const SimpleAccountView: React.FC = () => {
             <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
               <div className="flex items-center gap-2 text-sm font-bold text-slate-900">
                 <UserPlus className="w-4 h-4 text-sky-600" />
-                <h2>Find &amp; Add Users</h2>
+                <h2>People, Groups &amp; Invites</h2>
               </div>
               <p className="text-xs text-slate-600 leading-relaxed">
-                New accounts start private—you only see users and their live status (online, busy, away) once you search by @username or name and add them.
+                Find people by name, @username, or @email, create focused team groups, or invite teammates by email.
               </p>
-              <button
-                onClick={() => setAddMemberOpen(true)}
-                className="w-full min-h-[44px] px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
-              >
-                <UserPlus className="w-4 h-4" />
-                <span>Search &amp; Add User</span>
-              </button>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => setAddMemberOpen(true)}
+                  className="w-full min-h-[44px] px-4 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+                >
+                  <UserPlus className="w-4 h-4" />
+                  <span>Find &amp; Invite</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={openCreateGroupModal}
+                  className="w-full min-h-[44px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+                >
+                  <Users className="w-4 h-4" />
+                  <span>Create Group</span>
+                </button>
+              </div>
             </div>
 
             <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-3">
@@ -598,36 +609,47 @@ export const SimpleAccountView: React.FC = () => {
           </div>
         </div>
 
-        {/* Added Contacts Directory Card */}
-        <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-4">
+        {/* Platform Users Directory Card */}
+        <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div>
               <h2 className="text-base font-bold text-slate-900">
-                Added Contacts &amp; Status ({visibleDirectoryUsers.length})
+                Platform Users &amp; Live Status ({visibleDirectoryUsers.length})
               </h2>
               <p className="text-xs text-slate-500">
-                Users you add persist across every login with live online, busy, away, and offline status.
+                All users on SphereCall appear here with live status. Add someone as a member first before sending messages or starting a call.
               </p>
             </div>
 
-            <div className="flex items-center gap-2 w-full sm:w-auto">
+            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
               <div className="relative flex-1 sm:w-64">
                 <Search className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
                 <input
                   type="text"
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  placeholder="Search added contacts or @username..."
-                  className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-3 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
+                  placeholder="Find by name, @username, or @email..."
+                  className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-8 text-xs text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white"
                 />
+                {searchingEmail && (
+                  <Loader2 className="w-3.5 h-3.5 text-sky-600 animate-spin absolute right-3 top-3" />
+                )}
               </div>
+              <button
+                type="button"
+                onClick={openCreateGroupModal}
+                className="min-h-[40px] px-3.5 rounded-xl border border-sky-200 bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-semibold flex items-center gap-1.5 shrink-0"
+              >
+                <Users className="w-4 h-4" />
+                <span>Create Group</span>
+              </button>
               <button
                 type="button"
                 onClick={() => setAddMemberOpen(true)}
                 className="min-h-[40px] px-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center gap-1.5 shrink-0"
               >
                 <UserPlus className="w-4 h-4" />
-                <span>Add User</span>
+                <span>Invite</span>
               </button>
             </div>
           </div>
@@ -670,21 +692,32 @@ export const SimpleAccountView: React.FC = () => {
           {visibleDirectoryUsers.length <= 1 && (
             <div className="p-3.5 rounded-xl bg-slate-50 border border-dashed border-slate-200 text-xs text-slate-600 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <span>
-                You have not added any contacts yet. Search by <span className="font-semibold text-slate-800">@username</span> or name to add people and view their live status.
+                No other users have joined SphereCall yet. Invite friends or teammates by email so you can chat, call, and create groups together.
               </span>
               <button
                 type="button"
                 onClick={() => setAddMemberOpen(true)}
                 className="text-sky-600 hover:text-sky-700 font-semibold shrink-0 text-left"
               >
-                + Find &amp; Add User
+                + Invite by Email
               </button>
             </div>
           )}
 
           <div className="divide-y divide-slate-100">
+            {filteredTeam.length === 0 && search.trim() && (
+              <div className="py-5 text-center text-xs text-slate-500">
+                {searchingEmail
+                  ? 'Searching users by email...'
+                  : searchedEmail
+                  ? `No registered user found for ${searchedEmail}.`
+                  : `No users match "${search}".`}
+              </div>
+            )}
             {filteredTeam.map((member) => {
               const isMe = member.uid === firebaseUser?.uid;
+              const isMember = isAddedMember(member.uid);
+              const isAdding = addingUid === member.uid;
               const effectiveStatus = getEffectiveUserStatus(
                 member,
                 firebaseUser?.uid,
@@ -726,6 +759,11 @@ export const SimpleAccountView: React.FC = () => {
                             @{member.username}
                           </span>
                         )}
+                        {matchedEmailUser?.uid === member.uid && (
+                          <span className="text-[10px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded">
+                            Matched by email
+                          </span>
+                        )}
                         <UserStatusBadge status={effectiveStatus} />
                       </div>
                       <div className="text-xs text-slate-500 truncate mt-0.5">
@@ -735,35 +773,73 @@ export const SimpleAccountView: React.FC = () => {
                   </div>
 
                   {!isMe && (
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        onClick={() => startDirectChat(member.uid)}
-                        className="min-h-[40px] px-3.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
-                      >
-                        <MessageSquare className="w-3.5 h-3.5" />
-                        <span>Message</span>
-                      </button>
-                      <button
-                        onClick={() =>
-                          startVideoCall(`Call with ${member.displayName}`, [
-                            firebaseUser!.uid,
-                            member.uid,
-                          ])
-                        }
-                        className="min-h-[40px] px-3.5 rounded-xl bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-semibold flex items-center gap-1.5"
-                      >
-                        <Video className="w-3.5 h-3.5" />
-                        <span>Call</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => removeContact(member.uid)}
-                        className="min-h-[40px] min-w-[40px] rounded-xl border border-slate-200 hover:bg-rose-50 hover:border-rose-200 hover:text-rose-600 text-slate-400 flex items-center justify-center transition-colors"
-                        title={`Remove ${member.displayName} from contacts`}
-                        aria-label={`Remove ${member.displayName} from contacts`}
-                      >
-                        <UserMinus className="w-4 h-4" />
-                      </button>
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      {isMember ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => startDirectChat(member.uid)}
+                            className="min-h-[40px] px-3.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            <span>Message</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              startVideoCall(`Call with ${member.displayName}`, [
+                                firebaseUser!.uid,
+                                member.uid,
+                              ])
+                            }
+                            className="min-h-[40px] px-3.5 rounded-xl bg-sky-50 hover:bg-sky-100 text-sky-700 text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            <Video className="w-3.5 h-3.5" />
+                            <span>Call</span>
+                          </button>
+                        </>
+                      ) : (
+                        <>
+                          <button
+                            type="button"
+                            disabled={isAdding}
+                            onClick={async () => {
+                              setAddingUid(member.uid);
+                              try {
+                                await addContact(member.uid);
+                              } finally {
+                                setAddingUid(null);
+                              }
+                            }}
+                            className="min-h-[40px] px-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5"
+                          >
+                            {isAdding ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <UserPlus className="w-3.5 h-3.5" />
+                            )}
+                            <span>Add Member</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled
+                            title="Add as member first to send messages"
+                            className="min-h-[40px] px-3 rounded-xl border border-slate-200 bg-slate-100 text-slate-400 text-xs font-semibold flex items-center gap-1.5 cursor-not-allowed"
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            <span>Message</span>
+                          </button>
+                          <button
+                            type="button"
+                            disabled
+                            title="Add as member first to start a call"
+                            className="min-h-[40px] px-3 rounded-xl bg-slate-100 text-slate-400 text-xs font-semibold flex items-center gap-1.5 cursor-not-allowed"
+                          >
+                            <Video className="w-3.5 h-3.5" />
+                            <span>Call</span>
+                          </button>
+                        </>
+                      )}
                     </div>
                   )}
                 </div>
@@ -835,9 +911,9 @@ export const SimpleAccountView: React.FC = () => {
 
         {/* Admin Permissions Section (Only visible to Admins) */}
         {isAdmin && (
-          <div className="bg-white border border-slate-200 rounded-2xl p-5 sm:p-6 space-y-4">
+          <div className="bg-white border border-slate-200 rounded-2xl p-4 sm:p-6 space-y-4">
             <div className="flex items-center gap-2">
-              <Shield className="w-5 h-5 text-sky-600" />
+              <Shield className="w-5 h-5 text-sky-600 shrink-0" />
               <div>
                 <h2 className="text-base font-bold text-slate-900">Team Permissions</h2>
                 <p className="text-xs text-slate-500">
@@ -847,7 +923,7 @@ export const SimpleAccountView: React.FC = () => {
             </div>
 
             <div className="overflow-x-auto">
-              <table className="w-full text-left border-collapse">
+              <table className="w-full min-w-[540px] text-left border-collapse">
                 <thead>
                   <tr className="border-b border-slate-200 text-xs font-semibold text-slate-500">
                     <th className="py-2.5 pr-4">Member</th>
@@ -919,6 +995,8 @@ export const SimpleAccountView: React.FC = () => {
             </div>
           </div>
         )}
+
+        <Footer className="md:hidden rounded-2xl border border-slate-200" />
       </div>
 
       <AddMemberModal isOpen={addMemberOpen} onClose={() => setAddMemberOpen(false)} />

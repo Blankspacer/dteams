@@ -144,9 +144,9 @@ export const MobileDownloadModal: React.FC<MobileDownloadModalProps> = ({
   )}`;
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center p-4 overflow-y-auto">
-      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-lg overflow-hidden my-auto">
-        <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+    <div className="fixed inset-0 z-50 bg-slate-900/55 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
+      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-lg max-h-[90dvh] flex flex-col overflow-hidden">
+        <div className="px-4 sm:px-5 py-4 border-b border-slate-200 flex items-center justify-between gap-2 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <div className="w-8 h-8 rounded-lg bg-sky-50 text-sky-600 flex items-center justify-center shrink-0">
               <MonitorSmartphone className="w-4 h-4" />
@@ -154,21 +154,21 @@ export const MobileDownloadModal: React.FC<MobileDownloadModalProps> = ({
             <div className="min-w-0">
               <h3 className="text-base font-bold text-slate-900 truncate">{title}</h3>
               <p className="text-[11px] text-slate-500 truncate">
-                Works on Laptop (Windows, Mac, Linux) & Phone (Android, iPhone)
+                Works on Laptop (Windows, Mac, Linux) &amp; Phone (Android, iPhone)
               </p>
             </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="min-h-[36px] min-w-[36px] flex items-center justify-center text-slate-400 hover:text-slate-700"
+            className="min-h-[40px] min-w-[40px] flex items-center justify-center text-slate-400 hover:text-slate-700 shrink-0"
             aria-label="Close"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-5 sm:p-6 space-y-5">
+        <div className="p-4 sm:p-6 space-y-5 overflow-y-auto flex-1">
           {/* Internet connectivity status */}
           <div
             className={`px-3.5 py-2.5 rounded-xl border text-xs font-medium flex items-center gap-2 ${
@@ -381,7 +381,7 @@ export const MobileDownloadModal: React.FC<MobileDownloadModalProps> = ({
                 readOnly
                 value={downloadLink}
                 onFocus={(e) => e.target.select()}
-                className="flex-1 min-h-[42px] bg-slate-50 border border-slate-300 rounded-xl px-3 text-xs font-mono text-slate-800 focus:outline-none"
+                className="flex-1 min-w-0 min-h-[42px] bg-slate-50 border border-slate-300 rounded-xl px-3 text-xs font-mono text-slate-800 focus:outline-none"
               />
               <button
                 type="button"
@@ -393,30 +393,30 @@ export const MobileDownloadModal: React.FC<MobileDownloadModalProps> = ({
               </button>
             </div>
 
-            <div className="grid grid-cols-3 gap-2 pt-1">
+            <div className="grid grid-cols-3 gap-1.5 sm:gap-2 pt-1">
               <button
                 type="button"
                 onClick={handleShare}
-                className="min-h-[40px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold flex items-center justify-center gap-1.5"
+                className="min-h-[40px] px-2 sm:px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5"
               >
-                <Share2 className="w-3.5 h-3.5 text-sky-600" />
-                <span>Share</span>
+                <Share2 className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                <span className="truncate">Share</span>
               </button>
               <a
                 href={whatsappUrl}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="min-h-[40px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold flex items-center justify-center gap-1.5"
+                className="min-h-[40px] px-2 sm:px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5"
               >
-                <ExternalLink className="w-3.5 h-3.5 text-emerald-600" />
-                <span>WhatsApp</span>
+                <ExternalLink className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span className="truncate">WhatsApp</span>
               </a>
               <a
                 href={mailtoUrl}
-                className="min-h-[40px] px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-xs font-semibold flex items-center justify-center gap-1.5"
+                className="min-h-[40px] px-2 sm:px-3 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-slate-800 text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5"
               >
-                <Mail className="w-3.5 h-3.5 text-sky-600" />
-                <span>Email</span>
+                <Mail className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                <span className="truncate">Email</span>
               </a>
             </div>
           </div>

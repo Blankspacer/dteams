@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Bell, BellOff, Camera, ChevronDown, LogOut, Phone, User, Video, Volume2, VolumeX } from 'lucide-react';
+import { Bell, BellOff, Camera, ChevronDown, LogOut, Phone, User, Users, Video, Volume2, VolumeX } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useMeetingNotifications } from '../../context/NotificationContext';
 import { AppTab, UserStatus } from '../../types';
@@ -18,6 +18,7 @@ export const TopNav: React.FC = () => {
     updateMyProfile,
     signOut,
     setErrorBanner,
+    openCreateGroupModal,
   } = useApp();
   const {
     permission: notifPermission,
@@ -100,16 +101,16 @@ export const TopNav: React.FC = () => {
   };
 
   return (
-    <header className="h-14 bg-white border-b border-slate-200 px-3 sm:px-6 flex items-center justify-between gap-2 sm:gap-4 shrink-0 sticky top-0 z-30">
+    <header className="h-14 w-full max-w-full bg-white border-b border-slate-200 px-2.5 sm:px-6 flex items-center justify-between gap-1.5 sm:gap-4 shrink-0 sticky top-0 z-30">
       {/* Zone 1: Wordmark */}
       <button
         onClick={() => setActiveTab('chat')}
-        className="text-base sm:text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap shrink-0 flex items-center gap-2"
+        className="text-[15px] sm:text-lg font-bold tracking-tight text-slate-900 whitespace-nowrap min-w-0 flex items-center gap-1.5 sm:gap-2"
       >
-        <span className="w-7 h-7 rounded-lg bg-sky-600 text-white flex items-center justify-center text-sm font-bold">
+        <span className="w-7 h-7 rounded-lg bg-sky-600 text-white flex items-center justify-center text-sm font-bold shrink-0">
           S
         </span>
-        <span>SphereCall</span>
+        <span className="truncate">SphereCall</span>
       </button>
 
       {/* Zone 2: Primary Desktop Nav */}
@@ -132,20 +133,33 @@ export const TopNav: React.FC = () => {
         })}
       </nav>
 
-      {/* Zone 3: Download + Primary Call + Profile Avatar / Status Menu + Direct Log Out */}
-      <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
-        <PWAInstallButton variant="compact" />
+      {/* Zone 3: Quick Actions + Notifications + Profile Menu + Always-Visible Log Out */}
+      <div className="flex items-center gap-1 sm:gap-2 shrink-0">
+        <button
+          type="button"
+          onClick={openCreateGroupModal}
+          className="hidden md:flex px-3 py-2 min-h-[40px] rounded-xl border border-slate-200 bg-white hover:bg-sky-50 hover:border-sky-300 text-slate-700 hover:text-sky-700 text-xs font-semibold items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+          title="Create Group"
+          aria-label="Create Group"
+        >
+          <Users className="w-4 h-4 text-sky-600 shrink-0" />
+          <span className="hidden xl:inline">Create Group</span>
+        </button>
+
+        <div className="hidden lg:block shrink-0">
+          <PWAInstallButton variant="compact" />
+        </div>
 
         {!activeMeeting && (
           <button
             type="button"
             onClick={() => startVideoCall(undefined, undefined, 'voice')}
-            className="px-2.5 sm:px-3 py-2 min-h-[40px] rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+            className="hidden sm:flex px-3 py-2 min-h-[40px] rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-xs sm:text-sm font-semibold items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
             title="Start Voice Call"
             aria-label="Start Voice Call"
           >
             <Phone className="w-4 h-4 shrink-0" />
-            <span className="hidden sm:inline">Voice</span>
+            <span>Voice</span>
           </button>
         )}
 
@@ -157,12 +171,12 @@ export const TopNav: React.FC = () => {
               startVideoCall(undefined, undefined, 'video');
             }
           }}
-          className="px-2.5 sm:px-3.5 py-2 min-h-[40px] rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+          className="hidden min-[360px]:flex min-h-[40px] min-w-[40px] sm:min-w-0 px-2.5 sm:px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs sm:text-sm font-semibold items-center justify-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
           title={activeMeeting ? 'Return to active call' : 'Start Video Call'}
+          aria-label={activeMeeting ? 'Return to active call' : 'Start Video Call'}
         >
           <Video className="w-4 h-4 shrink-0" />
           <span className="hidden sm:inline">{activeMeeting ? 'Return to Call' : 'Video Call'}</span>
-          <span className="sm:hidden">{activeMeeting ? 'Call' : 'Video'}</span>
         </button>
 
         {/* 5-Minute Meeting Push Notifications Menu */}
@@ -173,7 +187,7 @@ export const TopNav: React.FC = () => {
               setAccountMenuOpen(false);
               setNotifMenuOpen((o) => !o);
             }}
-            className={`relative min-h-[40px] w-10 rounded-xl border flex items-center justify-center transition-colors shrink-0 ${
+            className={`relative min-h-[40px] min-w-[40px] w-10 rounded-xl border flex items-center justify-center transition-colors shrink-0 ${
               remindersEnabled
                 ? 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
                 : 'border-slate-200 bg-slate-50 text-slate-400'
@@ -195,7 +209,7 @@ export const TopNav: React.FC = () => {
           </button>
 
           {notifMenuOpen && (
-            <div className="absolute right-0 mt-1.5 w-72 bg-white border border-slate-200 rounded-2xl shadow-lg p-3.5 space-y-3 z-50">
+            <div className="fixed left-3 right-3 top-14 sm:absolute sm:left-auto sm:right-0 sm:top-auto sm:mt-1.5 sm:w-72 bg-white border border-slate-200 rounded-2xl shadow-lg p-3.5 space-y-3 z-50">
               <div className="flex items-start justify-between gap-2">
                 <div>
                   <div className="text-xs font-bold text-slate-900">Meeting Push Alerts</div>
@@ -226,7 +240,7 @@ export const TopNav: React.FC = () => {
                 <button
                   type="button"
                   onClick={toggleRemindersEnabled}
-                  className="w-full py-1.5 px-2 rounded-lg hover:bg-slate-50 flex items-center justify-between text-xs font-medium text-slate-800"
+                  className="w-full min-h-[38px] py-1.5 px-2 rounded-lg hover:bg-slate-50 flex items-center justify-between text-xs font-medium text-slate-800"
                 >
                   <span>5-Min Meeting Reminders</span>
                   <span
@@ -241,7 +255,7 @@ export const TopNav: React.FC = () => {
                 <button
                   type="button"
                   onClick={toggleSoundEnabled}
-                  className="w-full py-1.5 px-2 rounded-lg hover:bg-slate-50 flex items-center justify-between text-xs font-medium text-slate-800"
+                  className="w-full min-h-[38px] py-1.5 px-2 rounded-lg hover:bg-slate-50 flex items-center justify-between text-xs font-medium text-slate-800"
                 >
                   <span className="flex items-center gap-1.5">
                     {soundEnabled ? (
@@ -266,7 +280,7 @@ export const TopNav: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => requestNotificationPermission()}
-                    className="w-full min-h-[36px] px-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                    className="w-full min-h-[40px] px-3 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
                   >
                     <Bell className="w-3.5 h-3.5" />
                     <span>Enable Browser Push Alerts</span>
@@ -286,7 +300,7 @@ export const TopNav: React.FC = () => {
                       setNotifMenuOpen(false);
                       sendTestReminder();
                     }}
-                    className="min-h-[34px] px-2.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-[11px] font-semibold"
+                    className="min-h-[38px] px-2.5 rounded-xl border border-slate-200 hover:bg-slate-50 text-slate-700 text-[11px] font-semibold"
                   >
                     Test Alert
                   </button>
@@ -296,7 +310,7 @@ export const TopNav: React.FC = () => {
                       setNotifMenuOpen(false);
                       setActiveTab('calendar');
                     }}
-                    className="min-h-[34px] px-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-semibold"
+                    className="min-h-[38px] px-2.5 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-[11px] font-semibold"
                   >
                     Open Calendar
                   </button>
@@ -317,8 +331,11 @@ export const TopNav: React.FC = () => {
           />
           <button
             type="button"
-            onClick={() => setAccountMenuOpen((o) => !o)}
-            className="min-h-[40px] pl-1.5 pr-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0"
+            onClick={() => {
+              setNotifMenuOpen(false);
+              setAccountMenuOpen((o) => !o);
+            }}
+            className="min-h-[40px] pl-1 pr-1.5 sm:pl-1.5 sm:pr-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50 text-xs font-semibold text-slate-700 flex items-center gap-1 sm:gap-1.5 transition-colors whitespace-nowrap shrink-0"
             title={`${displayName} (${statusMeta.label})`}
             aria-label="Open profile and status menu"
           >
@@ -344,7 +361,7 @@ export const TopNav: React.FC = () => {
           </button>
 
           {accountMenuOpen && (
-            <div className="absolute right-0 mt-1.5 w-64 bg-white border border-slate-200 rounded-2xl shadow-lg py-2 z-50">
+            <div className="fixed left-3 right-3 top-14 sm:absolute sm:left-auto sm:right-0 sm:top-auto sm:mt-1.5 sm:w-64 bg-white border border-slate-200 rounded-2xl shadow-lg py-2 z-50 max-h-[calc(100dvh-5rem)] overflow-y-auto">
               <div className="px-3.5 py-2.5 border-b border-slate-100 flex items-center gap-2.5">
                 {currentProfile?.avatar ? (
                   <img
@@ -372,9 +389,20 @@ export const TopNav: React.FC = () => {
               <div className="py-1 border-b border-slate-100">
                 <button
                   type="button"
+                  onClick={() => {
+                    setAccountMenuOpen(false);
+                    openCreateGroupModal();
+                  }}
+                  className="md:hidden w-full min-h-[40px] px-3.5 py-2 text-left text-xs font-semibold text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors"
+                >
+                  <Users className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                  <span>Create Group</span>
+                </button>
+                <button
+                  type="button"
                   disabled={uploadingPhoto}
                   onClick={() => avatarInputRef.current?.click()}
-                  className="w-full px-3.5 py-2 text-left text-xs font-semibold text-sky-700 hover:bg-sky-50 flex items-center gap-2 transition-colors disabled:opacity-50"
+                  className="w-full min-h-[40px] px-3.5 py-2 text-left text-xs font-semibold text-sky-700 hover:bg-sky-50 flex items-center gap-2 transition-colors disabled:opacity-50"
                 >
                   <Camera className="w-3.5 h-3.5 shrink-0" />
                   <span>
@@ -391,7 +419,7 @@ export const TopNav: React.FC = () => {
                     setAccountMenuOpen(false);
                     setActiveTab('account');
                   }}
-                  className="w-full px-3.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors"
+                  className="w-full min-h-[40px] px-3.5 py-2 text-left text-xs font-medium text-slate-700 hover:bg-slate-50 flex items-center gap-2 transition-colors"
                 >
                   <User className="w-3.5 h-3.5 text-slate-500 shrink-0" />
                   <span>Account &amp; Profile Settings</span>
@@ -413,7 +441,7 @@ export const TopNav: React.FC = () => {
                         setAccountMenuOpen(false);
                         updateMyProfile({ status: opt.value });
                       }}
-                      className={`w-full px-3.5 py-1.5 text-left flex items-start gap-2.5 hover:bg-slate-50 transition-colors ${
+                      className={`w-full min-h-[40px] px-3.5 py-1.5 text-left flex items-start gap-2.5 hover:bg-slate-50 transition-colors ${
                         active ? 'bg-sky-50/70' : ''
                       }`}
                     >
@@ -432,7 +460,7 @@ export const TopNav: React.FC = () => {
                   type="button"
                   onClick={handleLogout}
                   disabled={loggingOut}
-                  className="w-full px-3.5 py-2 text-left text-xs font-semibold text-rose-600 hover:bg-rose-50 flex items-center gap-2 transition-colors disabled:opacity-50"
+                  className="w-full min-h-[42px] px-3.5 py-2 text-left text-xs font-semibold text-rose-600 hover:bg-rose-50 flex items-center gap-2 transition-colors disabled:opacity-50"
                 >
                   <LogOut className="w-3.5 h-3.5 shrink-0" />
                   <span>{loggingOut ? 'Logging out...' : 'Log Out'}</span>
@@ -442,16 +470,17 @@ export const TopNav: React.FC = () => {
           )}
         </div>
 
-        {/* Direct Logout Button (always 1-tap visible across all tabs) */}
+        {/* Direct Logout Button (always 1-tap visible inside viewport on mobile & desktop) */}
         <button
           type="button"
           onClick={handleLogout}
           disabled={loggingOut}
-          className="min-h-[40px] px-2.5 sm:px-3 rounded-xl border border-slate-200 bg-white hover:bg-rose-50 hover:border-rose-200 hover:text-rose-700 text-slate-700 text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
+          className="min-h-[40px] px-2.5 sm:px-3 rounded-xl border border-rose-200 md:border-slate-200 bg-rose-50/70 md:bg-white hover:bg-rose-50 hover:border-rose-300 hover:text-rose-700 text-rose-700 md:text-slate-700 text-[11px] sm:text-xs font-semibold flex items-center justify-center gap-1 sm:gap-1.5 transition-colors whitespace-nowrap shrink-0 disabled:opacity-50"
           title="Log Out"
           aria-label="Log Out"
         >
           <LogOut className="w-4 h-4 shrink-0" />
+          <span className="hidden min-[380px]:inline md:hidden">Logout</span>
           <span className="hidden lg:inline">{loggingOut ? 'Logging out...' : 'Log Out'}</span>
         </button>
       </div>
