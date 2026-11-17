@@ -14,6 +14,7 @@ import {
   CheckCircle2,
   Search,
   MessageSquare,
+  AlertTriangle,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { TeamInvite } from '../../types';
@@ -44,6 +45,7 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
     currentProfile,
     teamUsers,
     contacts,
+    teamInvites,
     inviteTeamMember,
     addContact,
     addContactsAndStartChat,
@@ -85,6 +87,12 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
     presenceNow
   );
 
+  const hasAddedOrInvited =
+    contacts.length > 0 ||
+    teamInvites.some((inv) => inv.invitedByUid === firebaseUser?.uid);
+  const mustAddBeforeEntering =
+    welcomeMode && !hasAddedOrInvited && otherUsers.length > 0;
+
   const cleanSearch = participantSearch.trim().toLowerCase().replace(/^@+/, '');
   const hasActiveSearch = cleanSearch.length >= 2;
 
@@ -116,6 +124,10 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
   };
 
   const handleClose = () => {
+    if (mustAddBeforeEntering) {
+      setError('Please add at least 1 user or invite a team member before entering your workspace.');
+      return;
+    }
     resetForm();
     onClose();
   };
@@ -249,24 +261,26 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
             <div className="min-w-0">
               <h3 className="text-base font-bold text-slate-900 truncate">
                 {welcomeMode
-                  ? 'Welcome! Add Users to Your App'
+                  ? 'First-Login Setup: Add Team Members'
                   : 'Find & Add Users'}
               </h3>
               <p className="text-[11px] text-slate-500 truncate">
                 {welcomeMode
-                  ? 'You will not see anyone until you add them by @username or name.'
+                  ? 'Manually search and add users or invite a teammate to get started.'
                   : 'Search by @username or full name to add users and see their live status.'}
               </p>
             </div>
           </div>
-          <button
-            type="button"
-            onClick={handleClose}
-            className="min-h-[36px] min-w-[36px] flex items-center justify-center text-slate-400 hover:text-slate-700 shrink-0"
-            aria-label="Close"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          {!mustAddBeforeEntering && (
+            <button
+              type="button"
+              onClick={handleClose}
+              className="min-h-[36px] min-w-[36px] flex items-center justify-center text-slate-400 hover:text-slate-700 shrink-0"
+              aria-label="Close"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          )}
         </div>
 
         {/* Tab Switcher */}
@@ -313,6 +327,17 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
                 <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
                   <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
                   <span>{error}</span>
+                </div>
+              )}
+
+              {welcomeMode && !hasAddedOrInvited && (
+                <div className="p-3 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <span>
+                    {otherUsers.length > 0
+                      ? 'First-time login requires adding at least 1 user or sending a team invite manually. Type a @username or name below to add teammates.'
+                      : 'No other users have signed up yet. Send an invite by email or continue to set up your workspace.'}
+                  </span>
                 </div>
               )}
 
@@ -491,13 +516,27 @@ export const AddMemberModal: React.FC<AddMemberModalProps> = ({
             </div>
 
             <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between gap-2.5 shrink-0">
-              <button
-                type="button"
-                onClick={handleClose}
-                className="min-h-[40px] px-4 rounded-xl border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 text-xs font-semibold"
-              >
-                {welcomeMode ? 'Continue to Workspace' : 'Close'}
-              </button>
+              {mustAddBeforeEntering ? (
+                <span className="text-[11px] font-semibold text-amber-700">
+                  Add 1+ user or invite a member to continue
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleClose}
+                  className={`min-h-[40px] px-4 rounded-xl text-xs font-semibold ${
+                    welcomeMode && hasAddedOrInvited
+                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white'
+                      : 'border border-slate-200 bg-white hover:bg-slate-100 text-slate-700'
+                  }`}
+                >
+                  {welcomeMode
+                    ? addedUsersList.length > 0
+                      ? `Continue to Workspace (${addedUsersList.length} added)`
+                      : 'Continue to Workspace'
+                    : 'Close'}
+                </button>
+              )}
 
               {selectedUids.length > 0 ? (
                 <button

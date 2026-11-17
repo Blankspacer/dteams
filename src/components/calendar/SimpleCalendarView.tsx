@@ -18,6 +18,7 @@ import {
   Bell,
   BellRing,
   Globe,
+  AlertTriangle,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { useMeetingNotifications } from '../../context/NotificationContext';
@@ -101,6 +102,10 @@ export const SimpleCalendarView: React.FC = () => {
   const [sharedMeetingId, setSharedMeetingId] = useState<string | null>(null);
   const [sharingId, setSharingId] = useState<string | null>(null);
   const [addMemberOpen, setAddMemberOpen] = useState<boolean>(false);
+  const [timeConflictModal, setTimeConflictModal] = useState<{
+    title: string;
+    whenText: string;
+  } | null>(null);
 
   const calendarDays = useMemo(
     () => getMonthCalendarDays(viewMonth.getFullYear(), viewMonth.getMonth()),
@@ -236,9 +241,37 @@ export const SimpleCalendarView: React.FC = () => {
     );
   };
 
+  const findConflictingEvent = (dateKey: string, time24: string) => {
+    if (!dateKey || !time24) return null;
+    const candidateIso = formatScheduledValue(dateKey, time24, selectedTimezone);
+    const candidateParsed = parseScheduledMeeting(candidateIso, selectedTimezone);
+    return (
+      scheduledEvents.find((ev) => {
+        if (editingMeetingId && ev.meeting.id === editingMeetingId) return false;
+        const sameWall = ev.parsed.dateKey === dateKey && ev.parsed.time24 === time24;
+        const sameInstant =
+          Boolean(candidateParsed) &&
+          Math.abs(ev.parsed.sortValue - candidateParsed!.sortValue) < 60_000;
+        return sameWall || sameInstant;
+      }) || null
+    );
+  };
+
+  const selectedSlotConflict = findConflictingEvent(selectedDate, selectedTime);
+
   const handleScheduleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting || !selectedDate || !selectedTime) return;
+
+    const conflict = findConflictingEvent(selectedDate, selectedTime);
+    if (conflict) {
+      setTimeConflictModal({
+        title: conflict.meeting.title,
+        whenText: conflict.parsed.displayFull,
+      });
+      return;
+    }
+
     setSubmitting(true);
     try {
       if (editingMeetingId) {
@@ -274,9 +307,17 @@ export const SimpleCalendarView: React.FC = () => {
         }
       }
     } catch (err) {
-      setErrorBanner(
-        err instanceof Error ? err.message : 'Could not save scheduled meeting.'
-      );
+      const msg = err instanceof Error ? err.message : 'Could not save scheduled meeting.';
+      if (msg.toLowerCase().includes("can't add 2 meetings at the same time")) {
+        setTimeConflictModal({
+          title: selectedSlotConflict?.meeting.title || 'Another meeting',
+          whenText:
+            selectedSlotConflict?.parsed.displayFull ||
+            `${formatDisplayDate(selectedDate)} · ${formatTimeDual(selectedTime)}`,
+        });
+      } else {
+        setErrorBanner(msg);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -861,6 +902,16 @@ export const SimpleCalendarView: React.FC = () => {
                 </div>
               </div>
 
+              {selectedSlotConflict && (
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs flex items-start gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                  <span>
+                    You can&apos;t add 2 meetings at the same time —{' '}
+                    <span className="font-semibold">&ldquo;{selectedSlotConflict.meeting.title}&rdquo;</span> is already scheduled at {selectedSlotConflict.parsed.displayTime}.
+                  </span>
+                </div>
+              )}
+
               {/* 24-Hour AM & PM Quick Time Slots Grid */}
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -895,7 +946,17 @@ export const SimpleCalendarView: React.FC = () => {
                       <button
                         key={slot}
                         type="button"
-                        onClick={() => setSelectedTime(slot)}
+                        onClick={() => {
+                          const conflict = findConflictingEvent(selectedDate, slot);
+                          if (conflict) {
+                            setTimeConflictModal({
+                              title: conflict.meeting.title,
+                              whenText: conflict.parsed.displayFull,
+                            });
+                            return;
+                          }
+                          setSelectedTime(slot);
+                        }}
                         className={`py-1.5 px-1.5 rounded-lg border text-center tabular-nums transition-colors ${
                           active
                             ? 'bg-sky-600 border-sky-600 text-white'
@@ -993,6 +1054,52 @@ export const SimpleCalendarView: React.FC = () => {
       </div>
 
       <AddMemberModal isOpen={addMemberOpen} onClose={() => setAddMemberOpen(false)} />
+
+      {/* Duplicate Time Conflict Popup Modal */}
+      {timeConflictModal && (
+        <div
+          className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4"
+          role="alertdialog"
+          aria-modal="true"
+          aria-labelledby="conflict-modal-title"
+        >
+          <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-sm p-6 space-y-4 shadow-xl">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-50 border border-rose-200 text-rose-600 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="min-w-0 space-y-1">
+                <h3
+                  id="conflict-modal-title"
+                  className="text-base font-bold text-slate-900 leading-snug"
+                >
+                  You can&apos;t add 2 meetings at the same time
+                </h3>
+                <p className="text-xs text-slate-600 leading-relaxed">
+                  <span className="font-semibold text-slate-800">
+                    &ldquo;{timeConflictModal.title}&rdquo;
+                  </span>{' '}
+                  is already scheduled for{' '}
+                  <span className="font-semibold text-slate-800">
+                    {timeConflictModal.whenText}
+                  </span>
+                  . Please select a different date or time slot.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-1">
+              <button
+                type="button"
+                onClick={() => setTimeConflictModal(null)}
+                className="min-h-[40px] px-4 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold transition-colors"
+              >
+                OK, Choose Another Time
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

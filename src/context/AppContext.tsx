@@ -288,6 +288,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           };
 
           await setDoc(doc(db, 'users', uid), profilePayload);
+          try {
+            localStorage.setItem(`spherecall_needs_onboarding_${uid}`, '1');
+          } catch {
+            // Ignore storage error
+          }
           setIsFirstLogin(true);
         } else {
           const existingData = userSnap.data() || {};
@@ -309,6 +314,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             setSelectedTimezoneState(existingData.timezone);
           }
           await updateDoc(doc(db, 'users', uid), updates);
+          try {
+            if (localStorage.getItem(`spherecall_needs_onboarding_${uid}`) === '1') {
+              setIsFirstLogin(true);
+            }
+          } catch {
+            // Ignore storage error
+          }
         }
       } catch (error) {
         handleFirestoreError(error, OperationType.WRITE, userPath);
@@ -928,6 +940,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const dismissFirstLoginPrompt = () => {
+    if (firebaseUser) {
+      try {
+        localStorage.removeItem(`spherecall_needs_onboarding_${firebaseUser.uid}`);
+      } catch {
+        // Ignore storage error
+      }
+    }
     setIsFirstLogin(false);
   };
 
@@ -1144,6 +1163,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   };
 
+  const findConflictingScheduledMeeting = (
+    dateKey: string,
+    time24: string,
+    tz: string,
+    excludeMeetingId?: string
+  ): MeetingRecord | null => {
+    const candidateIso = formatScheduledValue(dateKey, time24, tz);
+    const candidateParsed = parseScheduledMeeting(candidateIso, tz);
+    for (const m of meetings) {
+      if (m.status !== 'upcoming' && m.status !== 'live') continue;
+      if (excludeMeetingId && m.id === excludeMeetingId) continue;
+      const existingParsed = parseScheduledMeeting(m.scheduledTime, tz);
+      if (!existingParsed) continue;
+      const sameWallSlot =
+        existingParsed.dateKey === dateKey && existingParsed.time24 === time24;
+      const sameInstant =
+        Boolean(candidateParsed) &&
+        Math.abs(existingParsed.sortValue - candidateParsed!.sortValue) < 60_000;
+      if (sameWallSlot || sameInstant) {
+        return m;
+      }
+    }
+    return null;
+  };
+
   const scheduleMeeting = async (params: {
     title: string;
     date: string;
@@ -1153,6 +1197,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     participantIds?: string[];
   }): Promise<MeetingRecord | null> => {
     if (!firebaseUser) return null;
+    const tz = params.timeZone || selectedTimezone;
+    const conflict = findConflictingScheduledMeeting(params.date, params.time, tz);
+    if (conflict) {
+      throw new Error(
+        `You can't add 2 meetings at the same time. "${conflict.title}" is already scheduled for that time.`
+      );
+    }
+
     const mode = params.mode || 'video';
     const baseTitle = params.title.trim() || (mode === 'voice' ? 'Scheduled Voice Call' : 'Scheduled Team Meeting');
     const finalTitle =
@@ -1170,7 +1222,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       organizerId: firebaseUser.uid,
       organizerName: (currentProfile?.displayName || firebaseUser.displayName || 'Member').slice(0, 80),
       status: 'upcoming',
-      scheduledTime: formatScheduledValue(params.date, params.time, params.timeZone || selectedTimezone),
+      scheduledTime: formatScheduledValue(params.date, params.time, tz),
       isPublic: !params.participantIds || params.participantIds.length === 0,
       participantIds: participants,
       transcriptText: '',
@@ -1204,6 +1256,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   ) => {
     if (!firebaseUser) return;
+    const tz = params.timeZone || selectedTimezone;
+    const conflict = findConflictingScheduledMeeting(params.date, params.time, tz, meetingId);
+    if (conflict) {
+      throw new Error(
+        `You can't add 2 meetings at the same time. "${conflict.title}" is already scheduled for that time.`
+      );
+    }
+
     const mode = params.mode || 'video';
     const rawTitle = params.title.trim() || (mode === 'voice' ? 'Scheduled Voice Call' : 'Scheduled Team Meeting');
     const cleanedTitle = rawTitle.replace(/^Voice Call:\s*/i, '');
@@ -1216,7 +1276,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     try {
       await updateDoc(doc(db, 'meetings', meetingId), {
         title: finalTitle.slice(0, 150),
-        scheduledTime: formatScheduledValue(params.date, params.time, params.timeZone || selectedTimezone),
+        scheduledTime: formatScheduledValue(params.date, params.time, tz),
         isPublic: !params.participantIds || params.participantIds.length === 0,
         participantIds: participants,
         updatedAt: serverTimestamp(),
