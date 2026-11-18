@@ -135,6 +135,7 @@ interface AppContextType {
     }
   ) => Promise<void>;
   removeMessage: (messageId: string) => Promise<void>;
+  loadSearchableMessages: (forceRefresh?: boolean) => Promise<ChatMessage[]>;
 
   startVideoCall: (
     title?: string,
@@ -232,6 +233,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   } | null>(null);
   const [createGroupModalOpen, setCreateGroupModalOpen] = useState(false);
   const emailLookupCacheRef = useRef<Map<string, { uid: string | null; checkedAt: number }>>(new Map());
+  const messageSearchCacheRef = useRef<
+    Map<string, { updatedMs: number; fetchedAt: number; messages: ChatMessage[] }>
+  >(new Map());
   const manualStatusRef = useRef<UserStatus | null>(null);
   const preCallStatusRef = useRef<UserStatus>('online');
   const wasInCallRef = useRef<boolean>(false);
@@ -584,6 +588,68 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     return () => unsub();
   }, [firebaseUser, authVersion, activeConversationId]);
+
+  useEffect(() => {
+    messageSearchCacheRef.current.clear();
+  }, [firebaseUser?.uid]);
+
+  const loadSearchableMessages = async (forceRefresh = false): Promise<ChatMessage[]> => {
+    if (!firebaseUser || !firebaseUser.emailVerified) return [];
+
+    const now = Date.now();
+    const convResults = await Promise.all(
+      conversations.map(async (conv) => {
+        if (conv.id === activeConversationId) {
+          messageSearchCacheRef.current.set(conv.id, {
+            updatedMs: toMillis(conv.updatedAt),
+            fetchedAt: now,
+            messages,
+          });
+          return messages;
+        }
+
+        const updatedMs = toMillis(conv.updatedAt);
+        const cached = messageSearchCacheRef.current.get(conv.id);
+        if (
+          !forceRefresh &&
+          cached &&
+          cached.updatedMs === updatedMs &&
+          now - cached.fetchedAt < 60_000
+        ) {
+          return cached.messages;
+        }
+
+        try {
+          const q = query(
+            collection(db, 'conversations', conv.id, 'messages'),
+            or(
+              where('isPublic', '==', true),
+              where('participantIds', 'array-contains', firebaseUser.uid)
+            )
+          );
+          const snap = await getDocs(q);
+          const list: ChatMessage[] = [];
+          snap.forEach((d) => {
+            list.push({ id: d.id, ...(d.data() as Omit<ChatMessage, 'id'>) });
+          });
+          list.sort((a, b) => toMillis(a.createdAt) - toMillis(b.createdAt));
+          messageSearchCacheRef.current.set(conv.id, {
+            updatedMs,
+            fetchedAt: now,
+            messages: list,
+          });
+          return list;
+        } catch (err) {
+          console.warn(`Could not load search messages for ${conv.id}:`, err);
+          return cached?.messages || [];
+        }
+      })
+    );
+
+    const combined = convResults.flat();
+    combined.sort((a, b) => toMillis(b.createdAt) - toMillis(a.createdAt));
+    return combined;
+  };
 
   // 6. Subscribe to Meetings & Transcripts
   useEffect(() => {
@@ -2065,6 +2131,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         startDirectChat,
         sendMessage,
         removeMessage,
+        loadSearchableMessages,
         startVideoCall,
         scheduleMeeting,
         rescheduleMeeting,

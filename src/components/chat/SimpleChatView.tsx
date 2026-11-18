@@ -34,7 +34,10 @@ import {
   getEffectiveUserStatus,
   sortUsersByPresence,
 } from '../../utils/presence';
-import { UserStatus } from '../../types';
+import {
+  UserStatus,
+  ChatMessage,
+} from '../../types';
 import { Timestamp } from 'firebase/firestore';
 
 function formatMessageTime(ts: unknown): string {
@@ -47,6 +50,65 @@ function formatMessageTime(ts: unknown): string {
     return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   }
   return '';
+}
+
+function formatSearchTimestamp(ts: unknown): string {
+  if (!ts) return '';
+  const date =
+    ts instanceof Timestamp
+      ? ts.toDate()
+      : typeof ts === 'object' && ts !== null && 'seconds' in ts
+        ? new Date(((ts as { seconds: number }).seconds || 0) * 1000)
+        : null;
+  if (!date || Number.isNaN(date.getTime())) return '';
+  const now = new Date();
+  const sameDay =
+    date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+  if (sameDay) {
+    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  }
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
+    ' · ' +
+    date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+function renderHighlightedSnippet(text: string, tokens: string[]): React.ReactNode {
+  if (!text) return null;
+  const cleanTokens = tokens.filter((t) => t.length > 0);
+  if (cleanTokens.length === 0) return text;
+
+  const lower = text.toLowerCase();
+  let firstIdx = -1;
+  for (const tok of cleanTokens) {
+    const idx = lower.indexOf(tok);
+    if (idx !== -1 && (firstIdx === -1 || idx < firstIdx)) {
+      firstIdx = idx;
+    }
+  }
+
+  let snippet = text;
+  if (text.length > 140) {
+    const start = firstIdx > 40 ? firstIdx - 36 : 0;
+    const end = Math.min(text.length, start + 140);
+    snippet = (start > 0 ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '');
+  }
+
+  const escaped = cleanTokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  const regex = new RegExp(`(${escaped.join('|')})`, 'ig');
+  const parts = snippet.split(regex);
+
+  return parts.map((part, idx) => {
+    const isMatch = cleanTokens.some((tok) => part.toLowerCase() === tok);
+    return isMatch ? (
+      <mark key={idx} className="bg-amber-200/90 text-slate-900 rounded px-0.5 font-semibold">
+        {part}
+      </mark>
+    ) : (
+      <React.Fragment key={idx}>{part}</React.Fragment>
+    );
+  });
 }
 
 async function compressImageToDataUrl(file: File): Promise<string> {
@@ -102,6 +164,7 @@ export const SimpleChatView: React.FC = () => {
     messages,
     sendMessage,
     removeMessage,
+    loadSearchableMessages,
     openCreateGroupModal,
     updateGroupMembers,
     addContact,
@@ -115,6 +178,12 @@ export const SimpleChatView: React.FC = () => {
 
   const [mobileShowThread, setMobileShowThread] = useState(false);
   const [search, setSearch] = useState('');
+  const [globalQuery, setGlobalQuery] = useState('');
+  const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
+  const [globalScope, setGlobalScope] = useState<'all' | 'people' | 'groups' | 'messages'>('all');
+  const [searchableMessages, setSearchableMessages] = useState<ChatMessage[]>([]);
+  const [searchingHistory, setSearchingHistory] = useState(false);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<'all' | UserStatus>('all');
   const [textInput, setTextInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -141,6 +210,8 @@ export const SimpleChatView: React.FC = () => {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const globalSearchContainerRef = useRef<HTMLDivElement>(null);
+  const globalSearchInputRef = useRef<HTMLInputElement>(null);
 
   const activeConv = conversations.find((c) => c.id === activeConversationId) || conversations[0];
 
@@ -161,8 +232,77 @@ export const SimpleChatView: React.FC = () => {
   };
 
   useEffect(() => {
+    if (highlightedMessageId) {
+      const targetEl = document.getElementById(`chat-msg-${highlightedMessageId}`);
+      if (targetEl) {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const timer = setTimeout(() => {
+          setHighlightedMessageId((cur) => (cur === highlightedMessageId ? null : cur));
+        }, 3200);
+        return () => clearTimeout(timer);
+      }
+      return;
+    }
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages.length, activeConversationId]);
+  }, [messages.length, activeConversationId, highlightedMessageId]);
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        globalSearchInputRef.current?.focus();
+        setGlobalSearchOpen(true);
+      } else if (e.key === 'Escape' && globalSearchOpen) {
+        setGlobalSearchOpen(false);
+        globalSearchInputRef.current?.blur();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [globalSearchOpen]);
+
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        globalSearchContainerRef.current &&
+        !globalSearchContainerRef.current.contains(e.target as Node)
+      ) {
+        setGlobalSearchOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  useEffect(() => {
+    const trimmed = globalQuery.trim();
+    if (!trimmed) {
+      setSearchingHistory(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSearchingHistory(true);
+    const timer = setTimeout(() => {
+      loadSearchableMessages()
+        .then((all) => {
+          if (!cancelled) {
+            setSearchableMessages(all);
+          }
+        })
+        .catch(() => {})
+        .finally(() => {
+          if (!cancelled) {
+            setSearchingHistory(false);
+          }
+        });
+    }, 180);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [globalQuery, conversations.length, messages.length]);
 
   const handleFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     setUploadError(null);
@@ -219,6 +359,10 @@ export const SimpleChatView: React.FC = () => {
     searchingEmail,
     searchedEmail,
   } = useEmailSearchMatch(search);
+  const {
+    matchedEmailUser: globalEmailMatch,
+    searchingEmail: searchingGlobalEmail,
+  } = useEmailSearchMatch(globalQuery);
   const {
     matchedEmailUser: manageEmailMatch,
     searchingEmail: searchingManageEmail,
@@ -325,6 +469,54 @@ export const SimpleChatView: React.FC = () => {
   const addedPlatformUsers = filteredPlatformUsers.filter((u) => isAddedMember(u.uid));
   const availableNonMemberUsers = filteredPlatformUsers.filter((u) => !isAddedMember(u.uid));
 
+  const trimmedGlobal = globalQuery.trim();
+  const cleanGlobal = trimmedGlobal.toLowerCase().replace(/^@+/, '');
+  const globalTokens = trimmedGlobal
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+
+  const globalMatchedPeople = trimmedGlobal
+    ? platformUsers.filter((u) => matchesUserSearch(u, globalQuery, globalEmailMatch?.uid))
+    : [];
+
+  const globalMatchedGroups = trimmedGlobal
+    ? channels.filter(
+        (c) =>
+          c.name.toLowerCase().includes(cleanGlobal) ||
+          (c.lastMessageText || '').toLowerCase().includes(cleanGlobal)
+      )
+    : [];
+
+  const globalMatchedMessages = React.useMemo(() => {
+    if (globalTokens.length === 0) return [];
+    const seenIds = new Set<string>();
+    const combined: ChatMessage[] = [];
+    for (const msg of [...messages, ...searchableMessages]) {
+      if (seenIds.has(msg.id)) continue;
+      seenIds.add(msg.id);
+      combined.push(msg);
+    }
+
+    return combined
+      .filter((msg) => {
+        const haystack = [
+          msg.content || '',
+          msg.attachmentName || '',
+          msg.senderName || '',
+        ]
+          .join(' ')
+          .toLowerCase();
+        return globalTokens.every((tok) => haystack.includes(tok));
+      })
+      .slice(0, 40);
+  }, [globalTokens.join('|'), messages, searchableMessages]);
+
+  const totalGlobalMatches =
+    globalMatchedPeople.length +
+    globalMatchedGroups.length +
+    globalMatchedMessages.length;
+
   const partner = getDirectPartner(activeConv);
   const partnerIsMember =
     activeConv?.type === 'direct' && partner ? isAddedMember(partner.uid) : true;
@@ -336,13 +528,362 @@ export const SimpleChatView: React.FC = () => {
       : '';
 
   return (
-    <div className="flex-1 flex overflow-hidden bg-slate-50">
-      {/* Left Sidebar: Groups & Team Members */}
-      <aside
-        className={`w-full md:w-80 bg-white border-r border-slate-200 flex-col shrink-0 ${
-          mobileShowThread ? 'hidden md:flex' : 'flex'
-        }`}
+    <div className="flex-1 flex flex-col overflow-hidden bg-slate-50">
+      {/* Global Search Bar (Team Members, Groups & Historical Messages) */}
+      <div
+        ref={globalSearchContainerRef}
+        className="relative z-30 bg-white border-b border-slate-200 px-3 sm:px-6 py-2.5 shrink-0"
       >
+        <div className="max-w-4xl mx-auto flex items-center gap-2">
+          <div className="relative flex-1">
+            <Search className="w-4 h-4 text-sky-600 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <input
+              ref={globalSearchInputRef}
+              type="text"
+              value={globalQuery}
+              onFocus={() => setGlobalSearchOpen(true)}
+              onChange={(e) => {
+                setGlobalQuery(e.target.value);
+                setGlobalSearchOpen(true);
+              }}
+              placeholder="Global search: find team members, groups, or message keywords..."
+              aria-label="Global search for team members, groups, or historical messages"
+              className="w-full min-h-[40px] bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-20 text-xs sm:text-sm text-slate-900 placeholder-slate-400 focus:outline-none focus:border-sky-600 focus:bg-white transition-colors"
+            />
+            <div className="absolute right-2.5 top-1/2 -translate-y-1/2 flex items-center gap-1.5">
+              {(searchingHistory || searchingGlobalEmail) && trimmedGlobal && (
+                <Loader2 className="w-3.5 h-3.5 text-sky-600 animate-spin" />
+              )}
+              {trimmedGlobal ? (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGlobalQuery('');
+                    setGlobalSearchOpen(false);
+                  }}
+                  className="p-1 rounded-md text-slate-400 hover:text-slate-700 hover:bg-slate-200/70 transition-colors"
+                  aria-label="Clear global search"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              ) : (
+                <kbd className="hidden sm:inline-flex items-center px-1.5 py-0.5 rounded border border-slate-200 bg-white text-[10px] font-mono text-slate-400">
+                  Ctrl+K
+                </kbd>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Global Search Results Popover */}
+        {globalSearchOpen && trimmedGlobal.length > 0 && (
+          <div className="absolute left-3 right-3 sm:left-6 sm:right-6 top-full mt-1.5 max-w-4xl mx-auto bg-white border border-slate-200 rounded-2xl shadow-xl overflow-hidden flex flex-col max-h-[72dvh]">
+            {/* Category Filter Tabs */}
+            <div className="px-3 sm:px-4 py-2 border-b border-slate-100 bg-slate-50/80 flex flex-wrap items-center justify-between gap-2 shrink-0">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {(
+                  [
+                    { id: 'all', label: 'All', count: totalGlobalMatches },
+                    { id: 'messages', label: 'Messages', count: globalMatchedMessages.length },
+                    { id: 'people', label: 'People', count: globalMatchedPeople.length },
+                    { id: 'groups', label: 'Groups', count: globalMatchedGroups.length },
+                  ] as const
+                ).map((tab) => (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    onClick={() => setGlobalScope(tab.id)}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] font-semibold flex items-center gap-1.5 transition-colors ${
+                      globalScope === tab.id
+                        ? 'bg-sky-600 text-white'
+                        : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <span>{tab.label}</span>
+                    <span
+                      className={`tabular-nums text-[10px] ${
+                        globalScope === tab.id ? 'text-sky-100' : 'text-slate-400'
+                      }`}
+                    >
+                      {tab.count}
+                    </span>
+                  </button>
+                ))}
+              </div>
+              <button
+                type="button"
+                onClick={() => setGlobalSearchOpen(false)}
+                className="text-[11px] font-semibold text-slate-500 hover:text-slate-800 px-1.5 py-0.5"
+              >
+                Close (Esc)
+              </button>
+            </div>
+
+            {/* Results Body */}
+            <div className="overflow-y-auto p-3 sm:p-4 space-y-4">
+              {totalGlobalMatches === 0 && !searchingHistory && !searchingGlobalEmail ? (
+                <div className="py-8 text-center space-y-1">
+                  <p className="text-sm font-semibold text-slate-700">
+                    No results for &ldquo;{trimmedGlobal}&rdquo;
+                  </p>
+                  <p className="text-xs text-slate-500">
+                    Try searching by display name, @username, @email, group name, file name, or message keywords.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {/* Groups Matches */}
+                  {(globalScope === 'all' || globalScope === 'groups') &&
+                    globalMatchedGroups.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                          Groups ({globalMatchedGroups.length})
+                        </div>
+                        <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden">
+                          {globalMatchedGroups.slice(0, 8).map((conv) => (
+                            <button
+                              key={conv.id}
+                              type="button"
+                              onClick={() => {
+                                setActiveConversationId(conv.id);
+                                setMobileShowThread(true);
+                                setGlobalSearchOpen(false);
+                              }}
+                              className="w-full px-3 py-2.5 bg-white hover:bg-sky-50/70 flex items-center justify-between gap-3 text-left transition-colors"
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div className="w-8 h-8 rounded-lg bg-slate-100 text-slate-600 flex items-center justify-center shrink-0">
+                                  {conv.isPublic ? (
+                                    <Hash className="w-4 h-4" />
+                                  ) : (
+                                    <Lock className="w-4 h-4" />
+                                  )}
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="text-xs sm:text-sm font-semibold text-slate-900 truncate">
+                                    {renderHighlightedSnippet(conv.name, globalTokens)}
+                                  </div>
+                                  <div className="text-[11px] text-slate-500 truncate">
+                                    {conv.lastMessageText
+                                      ? renderHighlightedSnippet(conv.lastMessageText, globalTokens)
+                                      : conv.isPublic
+                                        ? 'Open team group'
+                                        : `${conv.participantIds?.length || 1} members`}
+                                  </div>
+                                </div>
+                              </div>
+                              <span className="text-[11px] font-semibold text-sky-600 shrink-0">
+                                Open
+                              </span>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Team Members Matches */}
+                  {(globalScope === 'all' || globalScope === 'people') &&
+                    globalMatchedPeople.length > 0 && (
+                      <div className="space-y-1.5">
+                        <div className="px-1 text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                          Team Members ({globalMatchedPeople.length})
+                        </div>
+                        <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden">
+                          {globalMatchedPeople.slice(0, 10).map((member) => {
+                            const effectiveStatus = getEffectiveUserStatus(
+                              member,
+                              firebaseUser?.uid,
+                              presenceNow
+                            );
+                            const meta = STATUS_META[effectiveStatus];
+                            const memberAdded = isAddedMember(member.uid);
+                            const isAdding = addingMemberUid === member.uid;
+
+                            return (
+                              <div
+                                key={member.uid}
+                                className="px-3 py-2 bg-white hover:bg-slate-50 flex items-center justify-between gap-2.5"
+                              >
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    await startDirectChat(member.uid);
+                                    setMobileShowThread(true);
+                                    setGlobalSearchOpen(false);
+                                  }}
+                                  className="flex-1 min-w-0 flex items-center gap-2.5 text-left"
+                                >
+                                  <div className="relative shrink-0">
+                                    {member.avatar ? (
+                                      <img
+                                        src={member.avatar}
+                                        alt={member.displayName}
+                                        referrerPolicy="no-referrer"
+                                        className="w-8 h-8 rounded-full object-cover border border-slate-200"
+                                      />
+                                    ) : (
+                                      <div className="w-8 h-8 rounded-full bg-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center">
+                                        {member.displayName.slice(0, 2).toUpperCase()}
+                                      </div>
+                                    )}
+                                    <span
+                                      className={`w-2.5 h-2.5 rounded-full border-2 border-white absolute bottom-0 right-0 ${meta.dotClass}`}
+                                    />
+                                  </div>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-xs sm:text-sm font-semibold text-slate-900 truncate">
+                                        {renderHighlightedSnippet(member.displayName, globalTokens)}
+                                      </span>
+                                      <UserStatusBadge status={effectiveStatus} compact />
+                                    </div>
+                                    <div className="text-[11px] text-slate-500 truncate">
+                                      {member.username ? `@${member.username}` : ''}
+                                      {member.username && (member.title || member.department) ? ' · ' : ''}
+                                      {[member.title, member.department].filter(Boolean).join(' · ')}
+                                    </div>
+                                  </div>
+                                </button>
+
+                                {memberAdded ? (
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setGlobalSearchOpen(false);
+                                        startVideoCall(
+                                          `Voice Call with ${member.displayName}`,
+                                          [firebaseUser!.uid, member.uid],
+                                          'voice'
+                                        );
+                                      }}
+                                      className="min-h-[32px] min-w-[32px] rounded-lg bg-emerald-50 hover:bg-emerald-100 text-emerald-700 flex items-center justify-center"
+                                      title={`Voice call ${member.displayName}`}
+                                    >
+                                      <Phone className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setGlobalSearchOpen(false);
+                                        startVideoCall(
+                                          `Call with ${member.displayName}`,
+                                          [firebaseUser!.uid, member.uid],
+                                          'video'
+                                        );
+                                      }}
+                                      className="min-h-[32px] min-w-[32px] rounded-lg bg-sky-50 hover:bg-sky-100 text-sky-700 flex items-center justify-center"
+                                      title={`Video call ${member.displayName}`}
+                                    >
+                                      <Video className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={isAdding}
+                                    onClick={() => handleAddMember(member.uid)}
+                                    className="min-h-[30px] px-2.5 rounded-lg bg-sky-600 hover:bg-sky-700 disabled:opacity-60 text-white text-[11px] font-semibold flex items-center gap-1 shrink-0"
+                                  >
+                                    {isAdding ? (
+                                      <Loader2 className="w-3 h-3 animate-spin" />
+                                    ) : (
+                                      <UserPlus className="w-3 h-3" />
+                                    )}
+                                    <span>Add Member</span>
+                                  </button>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                  {/* Historical Messages Matches */}
+                  {(globalScope === 'all' || globalScope === 'messages') && (
+                    <div className="space-y-1.5">
+                      <div className="px-1 flex items-center justify-between text-[11px] font-bold uppercase tracking-wider text-slate-400">
+                        <span>Historical Messages ({globalMatchedMessages.length})</span>
+                        {searchingHistory && (
+                          <span className="font-normal normal-case text-sky-600 flex items-center gap-1">
+                            <Loader2 className="w-3 h-3 animate-spin" />
+                            Searching all chats...
+                          </span>
+                        )}
+                      </div>
+
+                      {globalMatchedMessages.length === 0 ? (
+                        !searchingHistory && globalScope === 'messages' && (
+                          <p className="text-xs text-slate-500 px-1 py-2">
+                            No messages match &ldquo;{trimmedGlobal}&rdquo;.
+                          </p>
+                        )
+                      ) : (
+                        <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden">
+                          {globalMatchedMessages.map((msg) => {
+                            const conv = conversations.find((c) => c.id === msg.conversationId);
+                            const convLabel = conv ? getConversationTitle(conv) : 'Conversation';
+                            return (
+                              <button
+                                key={msg.id}
+                                type="button"
+                                onClick={() => {
+                                  setHighlightedMessageId(msg.id);
+                                  setActiveConversationId(msg.conversationId);
+                                  setMobileShowThread(true);
+                                  setGlobalSearchOpen(false);
+                                }}
+                                className="w-full px-3 py-2.5 bg-white hover:bg-sky-50/70 text-left space-y-1 transition-colors"
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                  <div className="flex items-center gap-1.5 min-w-0">
+                                    <span className="font-bold text-slate-900 truncate">
+                                      {renderHighlightedSnippet(msg.senderName || 'Member', globalTokens)}
+                                    </span>
+                                    <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-600 font-semibold truncate max-w-[160px]">
+                                      {convLabel}
+                                    </span>
+                                  </div>
+                                  <span className="text-slate-400 tabular-nums shrink-0">
+                                    {formatSearchTimestamp(msg.createdAt)}
+                                  </span>
+                                </div>
+                                {msg.content && (
+                                  <p className="text-xs text-slate-700 line-clamp-2 break-words">
+                                    {renderHighlightedSnippet(msg.content, globalTokens)}
+                                  </p>
+                                )}
+                                {msg.attachmentName && (
+                                  <div className="inline-flex items-center gap-1 text-[11px] text-sky-700 bg-sky-50 border border-sky-100 px-2 py-0.5 rounded-md">
+                                    <FileText className="w-3 h-3 shrink-0" />
+                                    <span className="truncate max-w-[240px]">
+                                      {renderHighlightedSnippet(msg.attachmentName, globalTokens)}
+                                    </span>
+                                  </div>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* Main Split Chat Container */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Left Sidebar: Groups & Team Members */}
+        <aside
+          className={`w-full md:w-80 bg-white border-r border-slate-200 flex-col shrink-0 ${
+            mobileShowThread ? 'hidden md:flex' : 'flex'
+          }`}
+        >
         <div className="p-4 border-b border-slate-200 space-y-3">
           <div className="flex items-center justify-between gap-2">
             <h2 className="text-base font-bold text-slate-900">Messages</h2>
@@ -944,11 +1485,19 @@ export const SimpleChatView: React.FC = () => {
                   const canDelete = isMe || currentProfile?.role === 'admin';
                   const liveSender = teamUsers.find((u) => u.uid === msg.senderId);
                   const avatarUrl = liveSender?.avatar || msg.senderAvatar;
+                  const isHighlighted = highlightedMessageId === msg.id;
 
                   return (
                     <div
                       key={msg.id}
-                      className={`flex gap-2.5 group ${isMe ? 'flex-row-reverse' : 'flex-row'}`}
+                      id={`chat-msg-${msg.id}`}
+                      className={`flex gap-2.5 group transition-all ${
+                        isMe ? 'flex-row-reverse' : 'flex-row'
+                      } ${
+                        isHighlighted
+                          ? 'ring-2 ring-amber-400 bg-amber-50/70 rounded-2xl p-2 -m-2'
+                          : ''
+                      }`}
                     >
                       {avatarUrl ? (
                         <img
@@ -1160,6 +1709,7 @@ export const SimpleChatView: React.FC = () => {
           </div>
         )}
       </main>
+      </div>
 
       {/* Manage / View Existing Group Members Modal */}
       {membersModalOpen && activeConv && (
