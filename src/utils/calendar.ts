@@ -305,3 +305,131 @@ export function getMonthCalendarDays(year: number, monthIndex: number): Array<{
   }
   return cells;
 }
+
+function escapeIcsText(value: string): string {
+  return String(value || '')
+    .replace(/\\/g, '\\\\')
+    .replace(/\r\n|\r|\n/g, '\\n')
+    .replace(/;/g, '\\;')
+    .replace(/,/g, '\\,');
+}
+
+function foldIcsLine(line: string): string {
+  if (line.length <= 75) return line;
+  const chunks: string[] = [];
+  let remaining = line;
+  chunks.push(remaining.slice(0, 75));
+  remaining = remaining.slice(75);
+  while (remaining.length > 0) {
+    chunks.push(' ' + remaining.slice(0, 74));
+    remaining = remaining.slice(74);
+  }
+  return chunks.join('\r\n');
+}
+
+function toIcsUtcTimestamp(epochMs: number): string {
+  const d = new Date(epochMs);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${d.getUTCFullYear()}` +
+    `${pad(d.getUTCMonth() + 1)}` +
+    `${pad(d.getUTCDate())}T` +
+    `${pad(d.getUTCHours())}` +
+    `${pad(d.getUTCMinutes())}` +
+    `${pad(d.getUTCSeconds())}Z`
+  );
+}
+
+export interface MeetingIcsExportInput {
+  id: string;
+  title: string;
+  organizerName: string;
+  scheduledTime?: string;
+  isPublic: boolean;
+  participantIds: string[];
+  participantNames?: string[];
+  durationMinutes?: number;
+  timeZone?: string;
+  appUrl?: string;
+}
+
+export function buildMeetingIcsContent(meeting: MeetingIcsExportInput): string {
+  const safeTz =
+    meeting.timeZone && isValidTimeZone(meeting.timeZone)
+      ? meeting.timeZone
+      : getSavedTimeZone();
+  const parsed = parseScheduledMeeting(meeting.scheduledTime, safeTz);
+  const startMs = parsed?.sortValue ?? Date.now();
+  const durationMins = meeting.durationMinutes && meeting.durationMinutes > 0
+    ? meeting.durationMinutes
+    : 30;
+  const endMs = startMs + durationMins * 60_000;
+  const isVoice = meeting.title.toLowerCase().includes('voice');
+  const typeLabel = isVoice ? 'Voice Call' : 'Video Meeting';
+  const locationText = `${typeLabel} — SphereCall`;
+
+  const descriptionLines = [
+    `Meeting: ${meeting.title}`,
+    `Type: ${typeLabel}`,
+    `Organizer: ${meeting.organizerName || 'Team Member'}`,
+    `Scheduled (${safeTz}): ${parsed ? parsed.displayFull : meeting.scheduledTime || 'Upcoming'}`,
+    meeting.isPublic
+      ? 'Access: Open to team'
+      : meeting.participantNames && meeting.participantNames.length > 0
+        ? `Participants: ${meeting.participantNames.join(', ')}`
+        : `Participants: ${meeting.participantIds.length} invited`,
+  ];
+  if (meeting.appUrl) {
+    descriptionLines.push(`Join via SphereCall: ${meeting.appUrl}`);
+  }
+
+  const cleanUidId = (meeting.id || `meet-${startMs}`).replace(/[^a-zA-Z0-9._-]/g, '-');
+  const rawLines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//SphereCall//Meeting Scheduler//EN',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'BEGIN:VEVENT',
+    `UID:${cleanUidId}@spherecall.app`,
+    `DTSTAMP:${toIcsUtcTimestamp(Date.now())}`,
+    `DTSTART:${toIcsUtcTimestamp(startMs)}`,
+    `DTEND:${toIcsUtcTimestamp(endMs)}`,
+    `SUMMARY:${escapeIcsText(meeting.title || 'SphereCall Meeting')}`,
+    `DESCRIPTION:${escapeIcsText(descriptionLines.join('\n'))}`,
+    `LOCATION:${escapeIcsText(locationText)}`,
+    ...(meeting.appUrl ? [`URL:${meeting.appUrl}`] : []),
+    'STATUS:CONFIRMED',
+    'BEGIN:VALARM',
+    'TRIGGER:-PT5M',
+    'ACTION:DISPLAY',
+    `DESCRIPTION:${escapeIcsText(`Reminder: ${meeting.title || 'SphereCall Meeting'} starts in 5 minutes`)}`,
+    'END:VALARM',
+    'END:VEVENT',
+    'END:VCALENDAR',
+  ];
+
+  return rawLines.map(foldIcsLine).join('\r\n') + '\r\n';
+}
+
+export function downloadMeetingAsIcs(meeting: MeetingIcsExportInput): void {
+  const icsContent = buildMeetingIcsContent(meeting);
+  const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' });
+  const slug = (meeting.title || 'spherecall-meeting')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '') || 'spherecall-meeting';
+  const parsed = parseScheduledMeeting(meeting.scheduledTime, meeting.timeZone);
+  const suffix = parsed?.dateKey ? `-${parsed.dateKey}` : '';
+  const filename = `${slug}${suffix}.ics`;
+
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
